@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
+import streamlit as st
 import math
 import os
 import random
-import json
-import shutil
-from dataclasses import dataclass
-
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -15,8 +12,11 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
 # ============================
-# 1) Configurações e Seeds
+# 1) Configurações Iniciais
 # ============================
+st.set_page_config(page_title="Mini-DDPM MNIST", layout="wide")
+st.title("🚀 Mini-DDPM: Modelo de Difusão (MNIST)")
+
 def seed_everything(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
@@ -25,10 +25,10 @@ def seed_everything(seed: int = 42):
 
 seed_everything(42)
 device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Executando em: {device}")
+st.sidebar.write(f"Executando em: **{device.upper()}**")
 
 # ============================
-# 2) Definição do Modelo (U-Net)
+# 2) Definição da Arquitetura
 # ============================
 def sinusoidal_time_embedding(t, dim=64):
     device = t.device
@@ -67,7 +67,6 @@ class Down(nn.Module):
         super().__init__()
         self.block = ResidualBlock(in_ch, out_ch, time_dim)
         self.pool = nn.AvgPool2d(2)
-
     def forward(self, x, t_emb):
         h = self.block(x, t_emb)
         return self.pool(h), h
@@ -77,7 +76,6 @@ class Up(nn.Module):
         super().__init__()
         self.up = nn.Upsample(scale_factor=2, mode="nearest")
         self.block = ResidualBlock(in_ch, out_ch, time_dim)
-
     def forward(self, x, skip, t_emb):
         x = self.up(x)
         x = torch.cat([x, skip], dim=1)
@@ -114,40 +112,7 @@ class MiniUNet(nn.Module):
         return self.out_conv(x)
 
 # ============================
-# 3) Funções de Visualização
-# ============================
-def show_images(x, title="Amostras", n=16):
-    x = x[:n].detach().cpu()
-    x = (x + 1) / 2
-    fig, axes = plt.subplots(2, 8, figsize=(12, 3))
-    axes = axes.flatten()
-    for i in range(n):
-        img = x[i].squeeze()
-        axes[i].imshow(img, cmap="gray")
-        axes[i].axis('off')
-    plt.suptitle(title)
-    plt.tight_layout()
-    plt.show()
-
-# ============================
-# 4) Preparação de Dados
-# ============================
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Lambda(lambda x: x * 2 - 1)
-])
-
-# Carregando FashionMNIST como alternativa estável ao download manual do Kaggle
-train_ds = datasets.FashionMNIST(root="./data", train=True, download=True, transform=transform)
-subset_size = 10000
-indices = np.random.choice(len(train_ds), size=subset_size, replace=False)
-train_subset = Subset(train_ds, indices)
-train_loader = DataLoader(train_subset, batch_size=128, shuffle=True)
-
-print(f"Dataset carregado: {len(train_subset)} imagens.")
-
-# ============================
-# 5) Configuração Difusão
+# 3) Difusão e Dados
 # ============================
 T = 200
 beta = torch.linspace(1e-4, 0.02, T).to(device)
@@ -160,43 +125,61 @@ def q_sample(x0, t, noise=None):
     a_bar = alpha_bar[t].view(-1, 1, 1, 1)
     return torch.sqrt(a_bar) * x0 + torch.sqrt(1.0 - a_bar) * noise, noise
 
-# ============================
-# 6) Treinamento
-# ============================
-model = MiniUNet().to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
-epochs = 2
+@st.cache_resource
+def get_dataloader():
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Lambda(lambda x: x * 2 - 1)
+    ])
+    train_ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
+    indices = np.random.choice(len(train_ds), size=5000, replace=False) # Reduzido para Streamlit
+    subset = Subset(train_ds, indices)
+    return DataLoader(subset, batch_size=128, shuffle=True)
 
-print("Iniciando treinamento...")
-for ep in range(1, epochs+1):
-    model.train()
-    losses = []
-    for x0, _ in train_loader:
-        x0 = x0.to(device)
-        t = torch.randint(0, T, (x0.size(0),), device=device)
-        xt, eps = q_sample(x0, t)
-        eps_pred = model(xt, t)
-        loss = F.mse_loss(eps_pred, eps)
+# ============================
+# 4) Sidebar e Controle
+# ============================
+st.sidebar.header("Parâmetros")
+epochs = st.sidebar.slider("Épocas", 1, 10, 2)
+train_btn = st.sidebar.button("Treinar Modelo")
+
+if "model_state" not in st.session_state:
+    st.session_state.model_state = MiniUNet().to(device)
+
+# ============================
+# 5) Loop de Treino (Streamlit)
+# ============================
+if train_btn:
+    loader = get_dataloader()
+    optimizer = torch.optim.AdamW(st.session_state.model_state.parameters(), lr=2e-4)
+    progress_bar = st.progress(0)
+    
+    for ep in range(epochs):
+        losses = []
+        for x0, _ in loader:
+            x0 = x0.to(device)
+            t = torch.randint(0, T, (x0.size(0),), device=device)
+            xt, eps = q_sample(x0, t)
+            eps_pred = st.session_state.model_state(xt, t)
+            loss = F.mse_loss(eps_pred, eps)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            losses.append(loss.item())
         
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        losses.append(loss.item())
-    print(f"Epoch {ep}/{epochs} - loss: {np.mean(losses):.4f}")
-
-# Salvar
-os.makedirs("checkpoints", exist_ok=True)
-torch.save(model.state_dict(), "checkpoints/mini_ddpm_mnist.pth")
+        avg_loss = np.mean(losses)
+        st.write(f"Época {ep+1} - Loss: {avg_loss:.4f}")
+        progress_bar.progress((ep + 1) / epochs)
+    st.success("Treino Finalizado!")
 
 # ============================
-# 7) Amostragem e Resultado
+# 6) Amostragem e Visualização
 # ============================
 @torch.no_grad()
 def p_sample_loop(model, n=16):
     model.eval()
     x = torch.randn(n, 1, 28, 28, device=device)
-    frames = []
-
     for t_inv in range(T-1, -1, -1):
         t = torch.full((n,), t_inv, device=device, dtype=torch.long)
         eps_pred = model(x, t)
@@ -205,11 +188,16 @@ def p_sample_loop(model, n=16):
         a = alpha[t].view(-1, 1, 1, 1)
         z = torch.randn_like(x) if t_inv > 0 else 0
         x = torch.sqrt(a) * x0_hat + torch.sqrt(1 - a) * z
-        
-        if t_inv in [T-1, int(T*0.5), 0]:
-            frames.append(x.clone())
-    return x, frames
+    return x
 
-print("Gerando amostras...")
-samples, frames = p_sample_loop(model)
-show_images(samples, "Imagens Geradas")
+st.header("Gerar Imagens")
+if st.button("Gerar Amostras"):
+    with st.spinner("Gerando..."):
+        samples = p_sample_loop(st.session_state.model_state)
+        samples = (samples + 1) / 2
+        
+        fig, axes = plt.subplots(2, 8, figsize=(12, 3))
+        for i, ax in enumerate(axes.flatten()):
+            ax.imshow(samples[i].squeeze().cpu().numpy(), cmap="gray")
+            ax.axis("off")
+        st.pyplot(fig)
