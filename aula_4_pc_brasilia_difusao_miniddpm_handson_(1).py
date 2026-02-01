@@ -544,32 +544,3 @@ for i, f in enumerate(frames):
     plt.title(f"Evolução (frame {i+1}/{len(frames)})")
 plt.tight_layout()
 plt.show()
-
-"""# 8) Exercício (turma)
-
-## A — Experimento (obrigatório)
-1. Mude `T` (50/100/200) e compare.  
-2. Mude `subset_size` (2k/10k/20k) e compare.  
-3. Aumente `epochs` (GPU) e compare.
-
-## B — Perguntas (obrigatório)
-- O que `beta_t` controla?  
-- O que `alpha_bar_t` representa?  
-- Por que prever `epsilon`?  
-- Onde entra “aprender distribuição” (ML/DL)?
-
-## C — Projeto (grupo)
-- Problema real  
-- Sem IA vs com IA  
-- Dados, riscos e validação  
-- Protótipo: notebook / wireframe + pipeline / vibe coding
-
-O que o beta_t controla? Define a quantidade de ruído adicionada na difusão direta. Determina quanto de ruido é adicionado ao longo do tempo.
-O que o alpha_bar_t representa? É o resultado acumulado do passo 1 ao longo do tempo.
-Por que prever o epsilon (ruído)? Aprevisão do ruído ajuda o modelo a isolar o que é ruído e o que é imagem
-
-Onde entra o "aprender a distribuição"? No contexto de modelos generativos, "aprender a distribuição" significa que o modelo aprende a mapear a densidade de probabilidade dos dados reais (neste caso, as imagens do MNIST). Através do treino, a rede aprende a reverter o processo de difusão, transformando um ruído genérico numa amostra que pertence à distribuição estatística das imagens de treino, gerando assim novos dados realistas.
-
-# 9) (Opcional) Streamlit
-Você pode criar um web app que carrega o checkpoint e mostra frames (ruído → imagem).
-"""
