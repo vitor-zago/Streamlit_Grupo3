@@ -1,5 +1,6 @@
-torch
-torchvision
-numpy
-matplotlib
-streamlit
+text
+torch>=2.0.0
+torchvision>=0.15.0
+streamlit>=1.28.0
+matplotlib>=3.7.0
+numpy>=1.24.0
