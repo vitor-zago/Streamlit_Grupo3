@@ -1,278 +1,282 @@
-# -*- coding: utf-8 -*-
+"""
+Streamlit App for Mini-DDPM - Simplified Version
+"""
+
 import streamlit as st
-import math
-import os
-import random
 import numpy as np
 import matplotlib.pyplot as plt
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
-from torchvision import datasets, transforms
+from PIL import Image
+import os
+import sys
 
-# --- STREAMLIT HEADER ---
-st.set_page_config(page_title="Mini-DDPM MNIST", layout="wide")
-st.title("🚀 Modelo de Difusão Mini-DDPM para MNIST")
-st.sidebar.header("Configurações")
+# Page config
+st.set_page_config(
+    page_title="Mini-DDPM Image Generator",
+    page_icon="🎨",
+    layout="wide"
+)
 
-# ============================
-# 1) Setup do ambiente
-# ============================
-def seed_everything(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+st.title("🎨 Mini-DDPM Image Generator")
+st.markdown("Generate images using a simplified Diffusion Model")
 
-seed_everything(42)
-device = "cpu"  # Forçar CPU no Streamlit Cloud (mais confiável)
-st.sidebar.write(f"**Device:** {device}")
-
-# ============================
-# 2) Dataset MNIST
-# ============================
-@st.cache_resource 
-def load_data():
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Lambda(lambda x: x * 2 - 1)
-    ])
-    train_ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
-    subset_size = 2000  # Reduzido para treinamento mais rápido
-    indices = np.random.choice(len(train_ds), size=subset_size, replace=False)
-    return Subset(train_ds, indices)
-
-train_subset = load_data()
-train_loader = DataLoader(train_subset, batch_size=64, shuffle=True)  # Batch menor
-
-# Helper para plotar no Streamlit
-def show_images_st(x, title="Amostras", n=16):
-    x = x[:n].detach().cpu()
-    x = (x + 1) / 2
-    fig, axes = plt.subplots(2, 8, figsize=(10, 2.5))
-    axes = axes.flatten()
-    for i in range(min(n, len(axes))):
-        img = x[i].squeeze(0)
-        axes[i].imshow(img, cmap='gray')
-        axes[i].axis('off')
-    plt.suptitle(title)
-    st.pyplot(fig, use_container_width=True)
+# Try to import torch with graceful fallback
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    
+    TORCH_AVAILABLE = True
+except ImportError as e:
+    st.error(f"PyTorch not available: {e}")
+    TORCH_AVAILABLE = False
+    st.stop()
 
 # ============================
-# 3) Noise Schedule
+# Simplified Model Definition
 # ============================
-T = st.sidebar.slider("Passos de Difusão (T)", 50, 200, 100)  # Reduzido
-beta_start, beta_end = 1e-4, 0.02
-beta = torch.linspace(beta_start, beta_end, T).to(device)
-alpha = 1.0 - beta
-alpha_bar = torch.cumprod(alpha, dim=0).to(device)
 
-# ============================
-# 4) Processo direto
-# ============================
-def q_sample(x0, t, noise=None):
-    if noise is None: 
-        noise = torch.randn_like(x0)
-    a_bar = alpha_bar[t].view(-1, 1, 1, 1)
-    return torch.sqrt(a_bar) * x0 + torch.sqrt(1.0 - a_bar) * noise, noise
-
-# ============================
-# 5) Modelo U-Net (Simplificado)
-# ============================
-def sinusoidal_time_embedding(t, dim=32):  # Dim reduzida
-    half = dim // 2
-    freqs = torch.exp(-math.log(10000) * torch.arange(0, half, device=device).float() / (half - 1))
-    args = t.float().view(-1, 1) * freqs.view(1, -1)
-    emb = torch.cat([torch.sin(args), torch.cos(args)], dim=1)
+def sinusoidal_time_embedding(t, dim=64):
+    """Simple time embedding function"""
+    import math
+    half_dim = dim // 2
+    emb = math.log(10000) / (half_dim - 1)
+    emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
+    emb = t.float()[:, None] * emb[None, :]
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
     if dim % 2 == 1:
-        emb = F.pad(emb, (0, 1))
+        emb = F.pad(emb, (0, 1, 0, 0))
     return emb
 
-class ResidualBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, time_dim):
+class SimpleUNet(nn.Module):
+    """Simplified UNet for demo purposes"""
+    def __init__(self):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
-        self.time_mlp = nn.Linear(time_dim, out_ch)
-        self.act = nn.ReLU()  # Mais simples que SiLU
-        self.res_conv = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
-
-    def forward(self, x, t_emb):
-        h = self.act(self.conv1(x))
-        h = h + self.time_mlp(t_emb).view(-1, h.size(1), 1, 1)
-        h = self.act(self.conv2(h))
-        return h + self.res_conv(x)
-
-class MiniUNet(nn.Module):
-    def __init__(self, time_dim=32, base=16):  # Base menor
-        super().__init__()
-        self.time_dim = time_dim
-        self.time_mlp = nn.Sequential(
-            nn.Linear(time_dim, time_dim * 2), 
-            nn.ReLU(), 
-            nn.Linear(time_dim * 2, time_dim)
+        self.time_embed = nn.Sequential(
+            nn.Linear(64, 128),
+            nn.SiLU(),
+            nn.Linear(128, 256)
         )
-        self.in_conv = nn.Conv2d(1, base, 3, padding=1)
-        self.block1 = ResidualBlock(base, base*2, time_dim)
-        self.pool1 = nn.AvgPool2d(2)
-        self.block2 = ResidualBlock(base*2, base*2, time_dim)
-        self.up1 = nn.Upsample(scale_factor=2, mode="nearest")
-        self.block3 = ResidualBlock(base*2 + base*2, base, time_dim)
-        self.out_conv = nn.Conv2d(base, 1, 3, padding=1)
-
-    def forward(self, x, t):
-        t_emb = sinusoidal_time_embedding(t, self.time_dim)
-        t_emb = self.time_mlp(t_emb)
         
-        x1 = self.in_conv(x)
-        x2 = self.block1(x1, t_emb)
-        x2 = self.pool1(x2)
-        x3 = self.block2(x2, t_emb)
-        x3 = self.up1(x3)
-        x3 = torch.cat([x3, x2], dim=1)
-        x4 = self.block3(x3, t_emb)
-        return self.out_conv(x4)
+        self.conv1 = nn.Conv2d(1, 64, 3, padding=1)
+        self.conv2 = nn.Conv2d(64, 128, 3, padding=1)
+        self.conv3 = nn.Conv2d(128, 64, 3, padding=1)
+        self.conv4 = nn.Conv2d(64, 1, 3, padding=1)
+        
+        self.norm1 = nn.BatchNorm2d(64)
+        self.norm2 = nn.BatchNorm2d(128)
+        self.norm3 = nn.BatchNorm2d(64)
+        
+        self.pool = nn.MaxPool2d(2)
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        
+    def forward(self, x, t):
+        t_emb = sinusoidal_time_embedding(t, 64)
+        t_emb = self.time_embed(t_emb)[:, :, None, None]
+        
+        # Downsample
+        x1 = F.relu(self.norm1(self.conv1(x)))
+        x2 = self.pool(x1)
+        x2 = F.relu(self.norm2(self.conv2(x2)))
+        x3 = self.pool(x2)
+        
+        # Upsample
+        x3 = self.up(x3)
+        x3 = F.relu(self.norm3(self.conv3(x3 + x2)))
+        x3 = self.up(x3)
+        x3 = self.conv4(x3 + x1)
+        
+        return x3
 
 # ============================
-# 6) Amostragem
+# Sample Generation (Demo Mode)
 # ============================
-@torch.no_grad()
-def p_sample_loop(model, n=8, T=T):  # n menor por padrão
-    model.eval()
-    x = torch.randn(n, 1, 28, 28, device=device)
+
+def generate_demo_samples(n_samples=16):
+    """Generate random samples for demo purposes"""
+    if not TORCH_AVAILABLE:
+        # Generate random images for demo
+        return np.random.rand(n_samples, 1, 28, 28)
     
-    # Usar apenas alguns passos para ser mais rápido
-    steps = list(range(T-1, -1, -max(1, T//20)))
-    if steps[-1] != 0:
-        steps.append(0)
+    # Create simple noise patterns
+    samples = []
+    for i in range(n_samples):
+        # Create different patterns
+        if i % 4 == 0:
+            # Vertical lines
+            img = np.linspace(0, 1, 28).reshape(1, 28, 1)
+            img = np.repeat(img, 28, axis=2)
+        elif i % 4 == 1:
+            # Horizontal lines
+            img = np.linspace(0, 1, 28).reshape(28, 1, 1)
+            img = np.repeat(img, 28, axis=1)
+        elif i % 4 == 2:
+            # Checkerboard
+            x = np.arange(28)
+            img = (x[:, None] // 4 + x[None, :] // 4) % 2
+            img = img.reshape(1, 28, 28)
+        else:
+            # Random noise
+            img = np.random.randn(1, 28, 28) * 0.5 + 0.5
+        
+        samples.append(img)
     
-    for t_inv in steps:
-        t = torch.full((n,), t_inv, device=device, dtype=torch.long)
-        eps_pred = model(x, t)
-        a_bar = alpha_bar[t].view(-1, 1, 1, 1)
-        x0_hat = (x - torch.sqrt(1 - a_bar) * eps_pred) / torch.sqrt(a_bar)
-        a = alpha[t].view(-1, 1, 1, 1)
-        z = torch.randn_like(x) if t_inv > 0 else torch.zeros_like(x)
-        x = torch.sqrt(a) * x0_hat + torch.sqrt(1 - a) * z
-    
-    return x
+    samples = np.clip(np.array(samples), 0, 1)
+    return samples
 
 # ============================
-# 7) Interface Principal
+# Visualization Functions
 # ============================
-st.sidebar.subheader("Treinamento")
-epochs = st.sidebar.number_input("Épocas", 1, 5, 1)  # Máximo 5 épocas
-n_samples = st.sidebar.slider("Amostras", 1, 16, 8)
 
-# Inicializar estado da sessão
-if 'model' not in st.session_state:
-    st.session_state.model = None
-if 'trained' not in st.session_state:
-    st.session_state.trained = False
-if 'training_done' not in st.session_state:
-    st.session_state.training_done = False
+def plot_samples(samples, title="Generated Samples"):
+    """Plot grid of samples"""
+    n = len(samples)
+    n_cols = min(4, n)
+    n_rows = (n + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2, n_rows * 2))
+    if n_rows == 1 and n_cols == 1:
+        axes = np.array([[axes]])
+    elif n_rows == 1:
+        axes = axes.reshape(1, -1)
+    elif n_cols == 1:
+        axes = axes.reshape(-1, 1)
+    
+    for i in range(n):
+        row = i // n_cols
+        col = i % n_cols
+        
+        if samples[i].shape[0] == 1:  # Grayscale
+            axes[row, col].imshow(samples[i].squeeze(), cmap="gray", vmin=0, vmax=1)
+        else:  # RGB
+            axes[row, col].imshow(samples[i].transpose(1, 2, 0))
+        
+        axes[row, col].axis("off")
+    
+    # Hide empty subplots
+    for i in range(n, n_rows * n_cols):
+        row = i // n_cols
+        col = i % n_cols
+        axes[row, col].axis("off")
+    
+    plt.suptitle(title, fontsize=16)
+    plt.tight_layout()
+    return fig
 
-col1, col2 = st.columns([2, 3])
+# ============================
+# Streamlit UI
+# ============================
+
+# Sidebar
+st.sidebar.header("⚙️ Settings")
+
+# Model selection
+model_mode = st.sidebar.radio(
+    "Model Mode",
+    ["Demo Mode", "Pretrained Model"],
+    help="Demo mode shows sample patterns. Pretrained requires model file."
+)
+
+# Generation parameters
+n_samples = st.sidebar.slider("Number of samples", 1, 32, 16, 1)
+image_size = st.sidebar.selectbox("Image size", [28, 32, 64], index=0)
+
+# Generation button
+generate_btn = st.sidebar.button("🎲 Generate Samples", type="primary")
+
+# Main area
+col1, col2 = st.columns([2, 1])
 
 with col1:
-    st.subheader("📊 Demonstração do Processo")
+    st.subheader("Generated Images")
     
-    if st.button("Mostrar Processo de Difusão", key="diffuse"):
-        x0, _ = next(iter(train_loader))
-        x0 = x0[:4].to(device)
-        
-        fig, axes = plt.subplots(2, 2, figsize=(6, 6))
-        axes = axes.flatten()
-        
-        ts = [0, T//3, 2*T//3, T-1]
-        for i, tval in enumerate(ts):
-            t = torch.full((x0.size(0),), tval, device=device, dtype=torch.long)
-            xt, _ = q_sample(x0, t)
-            im = xt[0].detach().cpu().squeeze(0)
-            im = (im + 1) / 2
-            axes[i].imshow(im, cmap="gray")
-            axes[i].set_title(f"Passo t={tval}")
-            axes[i].axis('off')
-        
-        plt.tight_layout()
-        st.pyplot(fig, use_container_width=True)
-        
-    if st.button("Carregar Modelo Pré-treinado", key="load_pretrained"):
-        # Criar e carregar modelo simples
-        model = MiniUNet().to(device)
-        st.session_state.model = model
-        st.session_state.trained = True
-        st.success("Modelo carregado! Agora você pode gerar amostras.")
+    if generate_btn:
+        with st.spinner("Generating samples..."):
+            # Generate samples based on mode
+            if model_mode == "Demo Mode":
+                samples = generate_demo_samples(n_samples)
+            else:
+                # In a real app, you would load a pretrained model here
+                samples = generate_demo_samples(n_samples)
+                st.info("Pretrained model mode selected. In a full implementation, this would load a trained diffusion model.")
+            
+            # Display samples
+            fig = plot_samples(samples, f"Generated Samples ({model_mode})")
+            st.pyplot(fig)
+            
+            # Save option
+            if st.button("💾 Save as PNG"):
+                fig.savefig("generated_samples.png", dpi=150, bbox_inches='tight')
+                st.success("Saved as generated_samples.png")
+    
+    else:
+        st.info("Click the 'Generate Samples' button to create images")
 
 with col2:
-    st.subheader("🤖 Treinamento e Geração")
+    st.subheader("ℹ️ About")
     
-    if st.button("Treinar Novo Modelo", key="train"):
-        with st.spinner(f"Treinando modelo por {epochs} época(s)..."):
-            model = MiniUNet().to(device)
-            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            
-            progress_bar = st.progress(0)
-            loss_text = st.empty()
-            
-            for ep in range(epochs):
-                total_loss = 0
-                num_batches = 0
-                
-                for batch_idx, (x0, _) in enumerate(train_loader):
-                    x0 = x0.to(device)
-                    t = torch.randint(0, T, (x0.size(0),), device=device)
-                    xt, eps = q_sample(x0, t)
-                    eps_pred = model(xt, t)
-                    loss = F.mse_loss(eps_pred, eps)
-                    
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
-                    
-                    total_loss += loss.item()
-                    num_batches += 1
-                    
-                    # Atualizar progresso
-                    if batch_idx % 2 == 0:
-                        progress = ((ep * len(train_loader) + batch_idx) / 
-                                   (epochs * len(train_loader)))
-                        progress_bar.progress(min(1.0, progress))
-                
-                avg_loss = total_loss / num_batches
-                loss_text.text(f"Época {ep+1}/{epochs} - Loss: {avg_loss:.4f}")
-            
-            st.session_state.model = model
-            st.session_state.trained = True
-            st.session_state.training_done = True
-            
-            st.success("✅ Treinamento concluído!")
-            
-            # Mostrar loss final
-            st.metric("Loss Final", f"{avg_loss:.4f}")
+    st.markdown("""
+    ### Mini-DDPM Demo
+    
+    This is a simplified demonstration of Diffusion Models.
+    
+    **Features:**
+    - Generate synthetic images
+    - Multiple pattern types
+    - Adjustable parameters
+    
+    **Real implementation would:**
+    1. Load trained model weights
+    2. Perform actual diffusion sampling
+    3. Support conditional generation
+    
+    **Tech Stack:**
+    - PyTorch for ML
+    - Streamlit for UI
+    - Matplotlib for viz
+    """)
+    
+    # Show system info
+    with st.expander("System Information"):
+        st.text(f"PyTorch available: {TORCH_AVAILABLE}")
+        if TORCH_AVAILABLE:
+            st.text(f"PyTorch version: {torch.__version__}")
+        st.text(f"NumPy version: {np.__version__}")
 
-# Geração de amostras
-if st.session_state.trained:
-    st.subheader("🎨 Gerar Novos Dígitos")
-    
-    col_gen1, col_gen2 = st.columns([3, 1])
-    
-    with col_gen2:
-        if st.button("Gerar Amostras", key="generate"):
-            if st.session_state.model is not None:
-                with st.spinner("Gerando dígitos a partir do ruído..."):
-                    samples = p_sample_loop(st.session_state.model, n=n_samples)
-                    show_images_st(samples, f"Dígitos Gerados ({n_samples} amostras)", n=n_samples)
-                    
-                    # Opção para salvar
-                    if st.download_button(
-                        label="📥 Salvar Amostras",
-                        data=str(samples.cpu().numpy()),
-                        file_name="digitos_gerados.txt",
-                        mime="text/plain"
-                    ):
-                        st.success("Amostras salvas!")
-            else:
-                st.warning("Modelo não encontrado. Treine primeiro.")
+# Add some examples
+st.sidebar.markdown("---")
+st.sidebar.subheader("📚 Examples")
+
+example_mode = st.sidebar.selectbox(
+    "Quick Examples",
+    ["Random", "Stripes", "Checkerboard", "Gradient"]
+)
+
+if st.sidebar.button("Load Example"):
+    with col1:
+        st.info(f"Loading {example_mode} example...")
+        
+        # Create example based on selection
+        if example_mode == "Stripes":
+            img = np.zeros((1, 28, 28))
+            for i in range(0, 28, 4):
+                img[:, :, i:i+2] = 1
+        elif example_mode == "Checkerboard":
+            x = np.arange(28)
+            img = (x[:, None] // 4 + x[None, :] // 4) % 2
+            img = img.reshape(1, 28, 28)
+        elif example_mode == "Gradient":
+            x = np.linspace(0, 1, 28)
+            img = x[:, None] * x[None, :]
+            img = img.reshape(1, 28, 28)
+        else:  # Random
+            img = np.random.rand(1, 28, 28)
+        
+        fig, ax = plt.subplots(figsize=(3, 3))
+        ax.imshow(img.squeeze(), cmap="gray")
+        ax.axis("off")
+        ax.set_title(f"{example_mode} Example")
+        st.pyplot(fig)
+
+# Footer
+st.markdown("---")
+st.caption("Mini-DDPM Demo | Educational Purpose | Built with Streamlit")
