@@ -1,12 +1,9 @@
 # -*- coding: utf-8 -*-
 
 # ============================
-# 1) Setup do ambiente
+# 1) Environment setup
 # ============================
-# Dica (Colab): Runtime > Change runtime type > GPU
-# No AntiGravity: normalmente roda com CPU; vai ser mais lento.
-!pip install kaggle
-!pip install torch torchvision diffusers transformers accelerate matplotlib numpy pillow
+
 import math
 import os
 import random
@@ -21,6 +18,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
+# ----------------------------
+# Reproducibility
+# ----------------------------
 def seed_everything(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
@@ -33,259 +33,121 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Device:", device)
 
 plt.rcParams["figure.dpi"] = 120
-import json
-import os
-
-# Suas credenciais do Kaggle
-kaggle_credentials = {
-    "username": "fabianemiranda",
-    "key": "KGAT_eb24ddc31e0938f244836f9b9c184af6"
-}
-
-# Criar diretório .kaggle
-os.makedirs(os.path.expanduser("~/.kaggle"), exist_ok=True)
-
-# Salvar o arquivo kaggle.json
-kaggle_path = os.path.expanduser("~/.kaggle/kaggle.json")
-with open(kaggle_path, 'w') as f:
-    json.dump(kaggle_credentials, f)
-
-# Dar permissões corretas
-os.chmod(kaggle_path, 0o600)
-
-print("✓ Arquivo kaggle.json criado com sucesso!")
-print(f"✓ Localização: {kaggle_path}")
-!kaggle datasets list
-!kaggle datasets download -d hojjatk/mnist-dataset
 
 # ============================
-# 2) Dataset MNIST (imagens 28x28)
+# 2) Dataset (FashionMNIST)
 # ============================
-# Baixar o dataset MNIST do Kaggle
-import os
-import shutil
 
-# Criar a estrutura de pastas que o PyTorch espera
-raw_folder = "./data/mnist_kaggle/MNIST/raw"
-os.makedirs(raw_folder, exist_ok=True)
-
-# Arquivos que o PyTorch espera
-files_to_move = [
-    "train-images.idx3-ubyte",
-    "train-labels.idx1-ubyte",
-    "t10k-images.idx3-ubyte",
-    "t10k-labels.idx1-ubyte"
-]
-
-print("Organizando arquivos para o PyTorch...")
-print("="*60)
-
-# Mover/copiar arquivos para a pasta correta
-for filename in files_to_move:
-    src = f"./data/mnist_kaggle/{filename}"
-    dst = f"{raw_folder}/{filename}"
-
-    if os.path.exists(src):
-        if not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            print(f"✓ Copiado: {filename}")
-        else:
-            print(f"⊙ Já existe: {filename}")
-    else:
-        print(f"✗ Não encontrado: {filename}")
-
-print("\n" + "="*60)
-print("Verificando estrutura final:")
-print(f"\n📁 {raw_folder}:")
-if os.path.exists(raw_folder):
-    for f in os.listdir(raw_folder):
-        filepath = os.path.join(raw_folder, f)
-        size = os.path.getsize(filepath) / (1024 * 1024)
-        print(f"  ✓ {f} ({size:.2f} MB)")
-else:
-    print("  ✗ Pasta não existe!")
-
-import os
-import shutil
-
-raw_folder = "./data/mnist_kaggle/MNIST/raw"
-
-# Mapeamento: nome atual → nome que o PyTorch espera
-rename_map = {
-    "train-images.idx3-ubyte": "train-images-idx3-ubyte",
-    "train-labels.idx1-ubyte": "train-labels-idx1-ubyte",
-    "t10k-images.idx3-ubyte": "t10k-images-idx3-ubyte",
-    "t10k-labels.idx1-ubyte": "t10k-labels-idx1-ubyte"
-}
-
-print("Renomeando arquivos...")
-print("="*60)
-
-for old_name, new_name in rename_map.items():
-    src = f"./data/mnist_kaggle/{old_name}"
-    dst = f"{raw_folder}/{new_name}"
-
-    if os.path.exists(src):
-        shutil.copy2(src, dst)
-        print(f"✓ {old_name} → {new_name}")
-    else:
-        print(f"✗ Não encontrado: {old_name}")
-
-print("\n" + "="*60)
-print("Verificando arquivos finais:")
-for filename in os.listdir(raw_folder):
-    filepath = os.path.join(raw_folder, filename)
-    size = os.path.getsize(filepath) / (1024 * 1024)
-    print(f"  ✓ {filename} ({size:.2f} MB)")
-
-print("\n✓ Arquivos prontos para o PyTorch!")
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, Subset
-import numpy as np
-import torch
-
-# Transform
 transform = transforms.Compose([
-    transforms.ToTensor(),                  # [0,1]
-    transforms.Lambda(lambda x: x * 2 - 1)  # [-1,1] para estabilizar
+    transforms.ToTensor(),              # [0,1]
+    transforms.Lambda(lambda x: x * 2 - 1)  # [-1,1]
 ])
 
-# Carregar MNIST (agora na estrutura correta)
-train_ds = datasets.FashionMNIST(root="./data", train=True, download=True, transform=transform)
-# Criar subset
-subset_size = 10000
+train_ds = datasets.FashionMNIST(
+    root="./data",
+    train=True,
+    download=True,
+    transform=transform
+)
+
+subset_size = 10_000
 indices = np.random.choice(len(train_ds), size=subset_size, replace=False)
 train_subset = Subset(train_ds, indices)
 
-# DataLoader
 batch_size = 128
-train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=0)
+train_loader = DataLoader(
+    train_subset,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=0
+)
 
-print(f"\n✓ MNIST carregado! {len(train_ds)} imagens no total")
-print(f"✓ Usando subset de {len(train_subset)} imagens")
-import matplotlib.pyplot as plt
+print(f"Dataset size: {len(train_ds)}")
+print(f"Subset size: {len(train_subset)}")
 
-def show_images_color(x, title="Amostras", n=16):
+# ----------------------------
+# Visualization helper
+# ----------------------------
+def show_images(x, title="Samples", n=16):
     x = x[:n].detach().cpu()
-    x = (x + 1) / 2  # [-1,1] -> [0,1]
+    x = (x + 1) / 2
 
-    # Criar grid
-    import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2, 8, figsize=(12, 3))
     axes = axes.flatten()
 
     for i in range(n):
-        img = x[i].permute(1, 2, 0)  # CHW -> HWC
-        axes[i].imshow(img)
-        axes[i].axis('off')
+        axes[i].imshow(x[i, 0], cmap="gray")
+        axes[i].axis("off")
 
     plt.suptitle(title)
     plt.tight_layout()
     plt.show()
 
-# Testar
 x0, y0 = next(iter(train_loader))
-show_images_color(x0, "CIFAR-10 - Imagens Coloridas")
-print(f"Batch shape: {x0.shape}")  # Será [128, 3, 32, 32]
-print(f"Labels: {y0[:10].tolist()}")
+show_images(x0, "FashionMNIST samples")
+print("Batch shape:", x0.shape)  # [128, 1, 28, 28]
 
 # ============================
-# 3) Noise Schedule (β, α, ᾱ)
+# 3) Noise schedule
 # ============================
 
-T = 200  # passos (para aula: 100–300 ok; modelos grandes usam 1000+)
+T = 200
 
 beta_start = 1e-4
 beta_end = 0.02
-beta = torch.linspace(beta_start, beta_end, T)  # (T,)
+beta = torch.linspace(beta_start, beta_end, T)
 
 alpha = 1.0 - beta
-alpha_bar = torch.cumprod(alpha, dim=0)         # (T,)
+alpha_bar = torch.cumprod(alpha, dim=0)
 
 beta = beta.to(device)
 alpha = alpha.to(device)
 alpha_bar = alpha_bar.to(device)
 
-import matplotlib.pyplot as plt
-plt.figure(); plt.plot(beta.detach().cpu().numpy()); plt.title("beta_t (noise schedule)"); plt.show()
-plt.figure(); plt.plot(alpha_bar.detach().cpu().numpy()); plt.title("alpha_bar_t (sinal preservado acumulado)"); plt.show()
+plt.figure()
+plt.plot(beta.cpu())
+plt.title("beta_t")
+plt.show()
 
-print("beta[0], beta[-1]:", float(beta[0]), float(beta[-1]))
-print("alpha_bar[0], alpha_bar[-1]:", float(alpha_bar[0]), float(alpha_bar[-1]))
+plt.figure()
+plt.plot(alpha_bar.cpu())
+plt.title("alpha_bar_t")
+plt.show()
 
 # ============================
-# 4) Processo direto: q(x_t | x_0)
+# 4) Forward diffusion q(x_t | x_0)
 # ============================
-# x_t = sqrt(alpha_bar_t)*x0 + sqrt(1-alpha_bar_t)*epsilon
 
 def q_sample(x0, t, noise=None):
     if noise is None:
         noise = torch.randn_like(x0)
     a_bar = alpha_bar[t].view(-1, 1, 1, 1)
-    return torch.sqrt(a_bar) * x0 + torch.sqrt(1.0 - a_bar) * noise, noise
-
-x0, _ = next(iter(train_loader))
-x0 = x0.to(device)
-
-ts = torch.tensor([0, 20, 60, 120, 199], device=device)
-imgs = []
-for tval in ts:
-    t = torch.full((x0.size(0),), int(tval.item()), device=device, dtype=torch.long)
-    xt, _ = q_sample(x0, t)
-    imgs.append(xt)
-
-import matplotlib.pyplot as plt
-plt.figure(figsize=(10, 2))
-for i, tval in enumerate(ts):
-    plt.subplot(1, len(ts), i+1)
-    im = imgs[i][0].detach().cpu()
-    im = (im + 1) / 2
-    plt.imshow(im.squeeze(0), cmap="gray")
-    plt.title(f"t={int(tval)}")
-    plt.axis("off")
-plt.suptitle("Processo direto: adicionando ruído (x0 -> xt)")
-plt.show()
-
-"""# 5) Modelo que prevê o ruído (ε) — U-Net pequena
-
-Treinamos com:
-
-> **loss = MSE(ε_pred, ε_real)**
-
-## “Onde entra o tempo t?”
-A rede precisa saber o nível de ruído. Vamos usar **embedding de tempo sinusoidal**.
-
-"""
+    return (
+        torch.sqrt(a_bar) * x0 +
+        torch.sqrt(1.0 - a_bar) * noise,
+        noise
+    )
 
 # ============================
-# 5.1) Embedding de tempo (sinusoidal)
+# 5) Time embedding
 # ============================
-import math
-import torch
-import torch.nn.functional as F
 
 def sinusoidal_time_embedding(t, dim=64):
     device = t.device
     half = dim // 2
-    freqs = torch.exp(-math.log(10000) * torch.arange(0, half, device=device).float() / (half - 1))
+    freqs = torch.exp(
+        -math.log(10000) *
+        torch.arange(0, half, device=device).float() / (half - 1)
+    )
     args = t.float().view(-1, 1) * freqs.view(1, -1)
     emb = torch.cat([torch.sin(args), torch.cos(args)], dim=1)
     if dim % 2 == 1:
         emb = F.pad(emb, (0, 1))
     return emb
 
-t_test = torch.tensor([0, 10, 199], device=device)
-emb = sinusoidal_time_embedding(t_test, dim=64)
-print("t:", t_test)
-print("embedding shape:", emb.shape)
-print("embedding[0][:6]:", emb[0][:6])
-
 # ============================
-# 5.2) U-Net pequena (MNIST)
+# 6) Mini U-Net
 # ============================
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch, time_dim):
@@ -299,16 +161,9 @@ class ResidualBlock(nn.Module):
         self.res_conv = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
     def forward(self, x, t_emb):
-        h = self.conv1(x)
-        h = self.gn1(h)
-        h = self.act(h)
-
-        t = self.time_mlp(t_emb).view(-1, h.size(1), 1, 1)
-        h = h + t
-
-        h = self.conv2(h)
-        h = self.gn2(h)
-        h = self.act(h)
+        h = self.act(self.gn1(self.conv1(x)))
+        h = h + self.time_mlp(t_emb).view(-1, h.size(1), 1, 1)
+        h = self.act(self.gn2(self.conv2(h)))
         return h + self.res_conv(x)
 
 class Down(nn.Module):
@@ -335,7 +190,6 @@ class Up(nn.Module):
 class MiniUNet(nn.Module):
     def __init__(self, time_dim=64, base=32):
         super().__init__()
-        self.time_dim = time_dim
 
         self.time_mlp = nn.Sequential(
             nn.Linear(time_dim, time_dim * 4),
@@ -345,61 +199,39 @@ class MiniUNet(nn.Module):
 
         self.in_conv = nn.Conv2d(1, base, 3, padding=1)
 
-        self.down1 = Down(base, base*2, time_dim)      # 28 -> 14
-        self.down2 = Down(base*2, base*4, time_dim)    # 14 -> 7
+        self.down1 = Down(base, base * 2, time_dim)
+        self.down2 = Down(base * 2, base * 4, time_dim)
 
-        self.bot1 = ResidualBlock(base*4, base*4, time_dim)
-        self.bot2 = ResidualBlock(base*4, base*4, time_dim)
+        self.bot1 = ResidualBlock(base * 4, base * 4, time_dim)
+        self.bot2 = ResidualBlock(base * 4, base * 4, time_dim)
 
-        self.up2 = Up(base*4 + base*4, base*2, time_dim)  # 7 -> 14
-        self.up1 = Up(base*2 + base*2, base, time_dim)    # 14 -> 28
+        self.up2 = Up(base * 8, base * 2, time_dim)
+        self.up1 = Up(base * 4, base, time_dim)
 
-        self.out_conv = nn.Conv2d(base, 1, 3, padding=1)  # prevê epsilon
+        self.out_conv = nn.Conv2d(base, 1, 3, padding=1)
 
     def forward(self, x, t):
-        t_emb = sinusoidal_time_embedding(t, dim=self.time_dim)
-        t_emb = self.time_mlp(t_emb)
+        t_emb = self.time_mlp(sinusoidal_time_embedding(t, 64))
 
         x = self.in_conv(x)
-        x, skip1 = self.down1(x, t_emb)
-        x, skip2 = self.down2(x, t_emb)
+        x, s1 = self.down1(x, t_emb)
+        x, s2 = self.down2(x, t_emb)
 
         x = self.bot1(x, t_emb)
         x = self.bot2(x, t_emb)
 
-        x = self.up2(x, skip2, t_emb)
-        x = self.up1(x, skip1, t_emb)
+        x = self.up2(x, s2, t_emb)
+        x = self.up1(x, s1, t_emb)
 
         return self.out_conv(x)
 
-model = MiniUNet(time_dim=64, base=32).to(device)
-
-x0, _ = next(iter(train_loader))
-x0 = x0.to(device)
-t = torch.randint(0, T, (x0.size(0),), device=device)
-eps_pred = model(x0, t)
-print("x0:", x0.shape, "eps_pred:", eps_pred.shape)
-
-"""# 6) Treinamento (didático)
-Treino do DDPM:
-1. pega `x0`
-2. sorteia `t`
-3. cria `xt` e `ε_real`
-4. rede prevê `ε_pred`
-5. loss = MSE(ε_pred, ε_real)
-
-"""
+model = MiniUNet().to(device)
 
 # ============================
-# 6) Loop de treinamento
+# 7) Training loop
 # ============================
-import torch
-import torch.nn.functional as F
-import numpy as np
-import matplotlib.pyplot as plt
 
-lr = 2e-4
-optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
 
 def train_one_epoch(model, loader):
     model.train()
@@ -409,49 +241,30 @@ def train_one_epoch(model, loader):
         t = torch.randint(0, T, (x0.size(0),), device=device)
         xt, eps = q_sample(x0, t)
         eps_pred = model(xt, t)
-        loss = F.mse_loss(eps_pred, eps)
 
+        loss = F.mse_loss(eps_pred, eps)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
         losses.append(loss.item())
     return float(np.mean(losses))
 
 epochs = 2
 history = []
-for ep in range(1, epochs+1):
-    mean_loss = train_one_epoch(model, train_loader)
-    history.append(mean_loss)
-    print(f"Epoch {ep}/{epochs} - loss: {mean_loss:.4f}")
 
-plt.figure()
+for ep in range(1, epochs + 1):
+    loss = train_one_epoch(model, train_loader)
+    history.append(loss)
+    print(f"Epoch {ep}/{epochs} - loss: {loss:.4f}")
+
 plt.plot(history, marker="o")
-plt.title("Loss por época (MSE de epsilon)")
-plt.xlabel("época")
-plt.ylabel("loss")
+plt.title("Training loss")
 plt.show()
 
-# Salvar checkpoint (para Streamlit)
-os.makedirs("checkpoints", exist_ok=True)
-ckpt_path = "checkpoints/mini_ddpm_mnist.pth"
-torch.save({
-    "model_state": model.state_dict(),
-    "T": T,
-    "beta_start": beta_start,
-    "beta_end": beta_end
-}, ckpt_path)
-print("Checkpoint salvo em:", ckpt_path)
-
-"""# 7) Amostragem (gerar imagens a partir de ruído)
-Começamos com `x_T ~ N(0,1)` e iteramos até `x_0` removendo ruído gradualmente.
-
-"""
-
 # ============================
-# 7) Sampling (passo reverso simplificado)
+# 8) Sampling (reverse diffusion)
 # ============================
-import torch
-import matplotlib.pyplot as plt
 
 @torch.no_grad()
 def p_sample_loop(model, n=16):
@@ -459,7 +272,7 @@ def p_sample_loop(model, n=16):
     x = torch.randn(n, 1, 28, 28, device=device)
     frames = []
 
-    for t_inv in range(T-1, -1, -1):
+    for t_inv in range(T - 1, -1, -1):
         t = torch.full((n,), t_inv, device=device, dtype=torch.long)
         eps_pred = model(x, t)
 
@@ -467,28 +280,24 @@ def p_sample_loop(model, n=16):
         x0_hat = (x - torch.sqrt(1 - a_bar) * eps_pred) / torch.sqrt(a_bar)
 
         a = alpha[t].view(-1, 1, 1, 1)
-        if t_inv > 0:
-            z = torch.randn_like(x)
-        else:
-            z = torch.zeros_like(x)
+        z = torch.randn_like(x) if t_inv > 0 else torch.zeros_like(x)
 
         x = torch.sqrt(a) * x0_hat + torch.sqrt(1 - a) * z
 
-        if t_inv in [T-1, int(T*0.75), int(T*0.5), int(T*0.25), 0]:
+        if t_inv in [T - 1, T // 2, 0]:
             frames.append(x.clone())
 
     return x, frames
 
 samples, frames = p_sample_loop(model, n=16)
+show_images(samples, "Generated samples")
 
-show_images(samples, "Amostras geradas (difusão reversa)", n=16)
-
+# evolution visualization
 plt.figure(figsize=(10, 6))
 for i, f in enumerate(frames):
-    plt.subplot(len(frames), 1, i+1)
-    grid = torch.cat([(img.detach().cpu()+1)/2 for img in f[:16]], dim=2)
-    plt.imshow(grid.squeeze(0), cmap="gray")
+    plt.subplot(len(frames), 1, i + 1)
+    grid = torch.cat([((img.cpu() + 1) / 2)[0] for img in f[:16]], dim=1)
+    plt.imshow(grid, cmap="gray")
     plt.axis("off")
-    plt.title(f"Evolução (frame {i+1}/{len(frames)})")
 plt.tight_layout()
 plt.show()
