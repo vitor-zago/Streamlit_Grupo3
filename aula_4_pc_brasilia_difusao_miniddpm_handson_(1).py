@@ -1,282 +1,493 @@
+# -*- coding: utf-8 -*-
 """
-Streamlit App for Mini-DDPM - Simplified Version
+Código corrigido do Mini-DDPM para MNIST
+Versão simplificada para execução local
 """
 
-import streamlit as st
+# ============================
+# 1) Setup do ambiente
+# ============================
+import math
+import os
+import random
+import shutil
+
 import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image
-import os
-import sys
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms
 
-# Page config
-st.set_page_config(
-    page_title="Mini-DDPM Image Generator",
-    page_icon="🎨",
-    layout="wide"
-)
+def seed_everything(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-st.title("🎨 Mini-DDPM Image Generator")
-st.markdown("Generate images using a simplified Diffusion Model")
+seed_everything(42)
 
-# Try to import torch with graceful fallback
-try:
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("Device:", device)
+print(f"PyTorch version: {torch.__version__}")
+
+plt.rcParams["figure.dpi"] = 120
+
+# ============================
+# 2) Dataset MNIST (imagens 28x28)
+# ============================
+# Usando o MNIST padrão do torchvision
+transform = transforms.Compose([
+    transforms.ToTensor(),                  # [0,1]
+    transforms.Lambda(lambda x: x * 2 - 1)  # [-1,1]
+])
+
+# Carregar MNIST
+train_ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
+
+# Criar subset para treinamento mais rápido
+subset_size = 10000
+indices = np.random.choice(len(train_ds), size=subset_size, replace=False)
+train_subset = Subset(train_ds, indices)
+
+# DataLoader
+batch_size = 128
+train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=2)
+
+print(f"\n✓ MNIST carregado! {len(train_ds)} imagens no total")
+print(f"✓ Usando subset de {len(train_subset)} imagens")
+
+# ============================
+# Função para visualizar imagens (tons de cinza)
+# ============================
+def show_images(x, title="Amostras", n=16):
+    x = x[:n].detach().cpu()
+    x = (x + 1) / 2  # [-1,1] -> [0,1]
     
-    TORCH_AVAILABLE = True
-except ImportError as e:
-    st.error(f"PyTorch not available: {e}")
-    TORCH_AVAILABLE = False
-    st.stop()
-
-# ============================
-# Simplified Model Definition
-# ============================
-
-def sinusoidal_time_embedding(t, dim=64):
-    """Simple time embedding function"""
-    import math
-    half_dim = dim // 2
-    emb = math.log(10000) / (half_dim - 1)
-    emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
-    emb = t.float()[:, None] * emb[None, :]
-    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
-    if dim % 2 == 1:
-        emb = F.pad(emb, (0, 1, 0, 0))
-    return emb
-
-class SimpleUNet(nn.Module):
-    """Simplified UNet for demo purposes"""
-    def __init__(self):
-        super().__init__()
-        self.time_embed = nn.Sequential(
-            nn.Linear(64, 128),
-            nn.SiLU(),
-            nn.Linear(128, 256)
-        )
-        
-        self.conv1 = nn.Conv2d(1, 64, 3, padding=1)
-        self.conv2 = nn.Conv2d(64, 128, 3, padding=1)
-        self.conv3 = nn.Conv2d(128, 64, 3, padding=1)
-        self.conv4 = nn.Conv2d(64, 1, 3, padding=1)
-        
-        self.norm1 = nn.BatchNorm2d(64)
-        self.norm2 = nn.BatchNorm2d(128)
-        self.norm3 = nn.BatchNorm2d(64)
-        
-        self.pool = nn.MaxPool2d(2)
-        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        
-    def forward(self, x, t):
-        t_emb = sinusoidal_time_embedding(t, 64)
-        t_emb = self.time_embed(t_emb)[:, :, None, None]
-        
-        # Downsample
-        x1 = F.relu(self.norm1(self.conv1(x)))
-        x2 = self.pool(x1)
-        x2 = F.relu(self.norm2(self.conv2(x2)))
-        x3 = self.pool(x2)
-        
-        # Upsample
-        x3 = self.up(x3)
-        x3 = F.relu(self.norm3(self.conv3(x3 + x2)))
-        x3 = self.up(x3)
-        x3 = self.conv4(x3 + x1)
-        
-        return x3
-
-# ============================
-# Sample Generation (Demo Mode)
-# ============================
-
-def generate_demo_samples(n_samples=16):
-    """Generate random samples for demo purposes"""
-    if not TORCH_AVAILABLE:
-        # Generate random images for demo
-        return np.random.rand(n_samples, 1, 28, 28)
-    
-    # Create simple noise patterns
-    samples = []
-    for i in range(n_samples):
-        # Create different patterns
-        if i % 4 == 0:
-            # Vertical lines
-            img = np.linspace(0, 1, 28).reshape(1, 28, 1)
-            img = np.repeat(img, 28, axis=2)
-        elif i % 4 == 1:
-            # Horizontal lines
-            img = np.linspace(0, 1, 28).reshape(28, 1, 1)
-            img = np.repeat(img, 28, axis=1)
-        elif i % 4 == 2:
-            # Checkerboard
-            x = np.arange(28)
-            img = (x[:, None] // 4 + x[None, :] // 4) % 2
-            img = img.reshape(1, 28, 28)
-        else:
-            # Random noise
-            img = np.random.randn(1, 28, 28) * 0.5 + 0.5
-        
-        samples.append(img)
-    
-    samples = np.clip(np.array(samples), 0, 1)
-    return samples
-
-# ============================
-# Visualization Functions
-# ============================
-
-def plot_samples(samples, title="Generated Samples"):
-    """Plot grid of samples"""
-    n = len(samples)
-    n_cols = min(4, n)
-    n_rows = (n + n_cols - 1) // n_cols
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2, n_rows * 2))
-    if n_rows == 1 and n_cols == 1:
-        axes = np.array([[axes]])
-    elif n_rows == 1:
-        axes = axes.reshape(1, -1)
-    elif n_cols == 1:
-        axes = axes.reshape(-1, 1)
+    fig, axes = plt.subplots(2, 8, figsize=(12, 3))
+    axes = axes.flatten()
     
     for i in range(n):
-        row = i // n_cols
-        col = i % n_cols
-        
-        if samples[i].shape[0] == 1:  # Grayscale
-            axes[row, col].imshow(samples[i].squeeze(), cmap="gray", vmin=0, vmax=1)
-        else:  # RGB
-            axes[row, col].imshow(samples[i].transpose(1, 2, 0))
-        
-        axes[row, col].axis("off")
+        # Para MNIST: [1, 28, 28] -> [28, 28]
+        img = x[i].squeeze(0)  # Remove channel dimension
+        axes[i].imshow(img, cmap='gray')
+        axes[i].axis('off')
     
-    # Hide empty subplots
-    for i in range(n, n_rows * n_cols):
-        row = i // n_cols
-        col = i % n_cols
-        axes[row, col].axis("off")
-    
-    plt.suptitle(title, fontsize=16)
+    plt.suptitle(title)
     plt.tight_layout()
-    return fig
+    plt.show()
+
+# Testar visualização
+x0, y0 = next(iter(train_loader))
+show_images(x0, "MNIST - Dígitos")
+print(f"Batch shape: {x0.shape}")
+print(f"Labels: {y0[:16].tolist()}")
 
 # ============================
-# Streamlit UI
+# 3) Noise Schedule (β, α, ᾱ)
 # ============================
+T = 200  # passos
 
-# Sidebar
-st.sidebar.header("⚙️ Settings")
+beta_start = 1e-4
+beta_end = 0.02
+beta = torch.linspace(beta_start, beta_end, T)  # (T,)
 
-# Model selection
-model_mode = st.sidebar.radio(
-    "Model Mode",
-    ["Demo Mode", "Pretrained Model"],
-    help="Demo mode shows sample patterns. Pretrained requires model file."
-)
+alpha = 1.0 - beta
+alpha_bar = torch.cumprod(alpha, dim=0)         # (T,)
 
-# Generation parameters
-n_samples = st.sidebar.slider("Number of samples", 1, 32, 16, 1)
-image_size = st.sidebar.selectbox("Image size", [28, 32, 64], index=0)
+beta = beta.to(device)
+alpha = alpha.to(device)
+alpha_bar = alpha_bar.to(device)
 
-# Generation button
-generate_btn = st.sidebar.button("🎲 Generate Samples", type="primary")
+# Visualizar noise schedule
+plt.figure(figsize=(12, 4))
+plt.subplot(1, 2, 1)
+plt.plot(beta.detach().cpu().numpy())
+plt.title("beta_t (noise schedule)")
+plt.xlabel("Passo t")
+plt.ylabel("Beta")
 
-# Main area
-col1, col2 = st.columns([2, 1])
+plt.subplot(1, 2, 2)
+plt.plot(alpha_bar.detach().cpu().numpy())
+plt.title("alpha_bar_t")
+plt.xlabel("Passo t")
+plt.ylabel("Alpha_bar")
+plt.tight_layout()
+plt.show()
 
-with col1:
-    st.subheader("Generated Images")
+print("beta[0], beta[-1]:", float(beta[0]), float(beta[-1]))
+print("alpha_bar[0], alpha_bar[-1]:", float(alpha_bar[0]), float(alpha_bar[-1]))
+
+# ============================
+# 4) Processo direto: q(x_t | x_0)
+# ============================
+def q_sample(x0, t, noise=None):
+    """
+    x_t = sqrt(alpha_bar_t)*x0 + sqrt(1-alpha_bar_t)*epsilon
+    """
+    if noise is None:
+        noise = torch.randn_like(x0)
     
-    if generate_btn:
-        with st.spinner("Generating samples..."):
-            # Generate samples based on mode
-            if model_mode == "Demo Mode":
-                samples = generate_demo_samples(n_samples)
-            else:
-                # In a real app, you would load a pretrained model here
-                samples = generate_demo_samples(n_samples)
-                st.info("Pretrained model mode selected. In a full implementation, this would load a trained diffusion model.")
-            
-            # Display samples
-            fig = plot_samples(samples, f"Generated Samples ({model_mode})")
-            st.pyplot(fig)
-            
-            # Save option
-            if st.button("💾 Save as PNG"):
-                fig.savefig("generated_samples.png", dpi=150, bbox_inches='tight')
-                st.success("Saved as generated_samples.png")
+    # Garantir que t seja tensor e tenha dimensões adequadas
+    if not isinstance(t, torch.Tensor):
+        t = torch.tensor(t, device=device)
     
+    a_bar = alpha_bar[t].view(-1, 1, 1, 1)
+    return torch.sqrt(a_bar) * x0 + torch.sqrt(1.0 - a_bar) * noise, noise
+
+# Visualizar processo de difusão
+x0_batch = x0.to(device)
+ts = [0, 20, 60, 120, 199]
+imgs = []
+
+plt.figure(figsize=(15, 3))
+for i, tval in enumerate(ts):
+    t = torch.full((x0_batch.size(0),), tval, device=device, dtype=torch.long)
+    xt, _ = q_sample(x0_batch, t)
+    
+    plt.subplot(1, len(ts), i+1)
+    im = xt[0].detach().cpu()
+    im = (im + 1) / 2
+    plt.imshow(im.squeeze(0), cmap="gray")
+    plt.title(f"t={tval}")
+    plt.axis("off")
+
+plt.suptitle("Processo direto: adicionando ruído (x0 -> xt)")
+plt.tight_layout()
+plt.show()
+
+# ============================
+# 5.1) Embedding de tempo (sinusoidal)
+# ============================
+def sinusoidal_time_embedding(t, dim=64):
+    device = t.device
+    half = dim // 2
+    freqs = torch.exp(-math.log(10000) * torch.arange(0, half, device=device).float() / (half - 1))
+    args = t.float().view(-1, 1) * freqs.view(1, -1)
+    emb = torch.cat([torch.sin(args), torch.cos(args)], dim=1)
+    if dim % 2 == 1:
+        emb = F.pad(emb, (0, 1))
+    return emb
+
+# Testar embedding
+t_test = torch.tensor([0, 10, 199], device=device)
+emb = sinusoidal_time_embedding(t_test, dim=64)
+print("Embedding shape:", emb.shape)
+
+# ============================
+# 5.2) U-Net pequena para MNIST
+# ============================
+class ResidualBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, time_dim):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.time_mlp = nn.Linear(time_dim, out_ch)
+        self.gn1 = nn.GroupNorm(8, out_ch)
+        self.gn2 = nn.GroupNorm(8, out_ch)
+        self.act = nn.SiLU()
+        self.res_conv = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x, t_emb):
+        h = self.conv1(x)
+        h = self.gn1(h)
+        h = self.act(h)
+
+        t = self.time_mlp(t_emb).view(-1, h.size(1), 1, 1)
+        h = h + t
+
+        h = self.conv2(h)
+        h = self.gn2(h)
+        h = self.act(h)
+        
+        return h + self.res_conv(x)
+
+class Down(nn.Module):
+    def __init__(self, in_ch, out_ch, time_dim):
+        super().__init__()
+        self.block = ResidualBlock(in_ch, out_ch, time_dim)
+        self.pool = nn.AvgPool2d(2)
+
+    def forward(self, x, t_emb):
+        h = self.block(x, t_emb)
+        return self.pool(h), h
+
+class Up(nn.Module):
+    def __init__(self, in_ch, out_ch, time_dim):
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=2, mode="nearest")
+        self.block = ResidualBlock(in_ch, out_ch, time_dim)
+
+    def forward(self, x, skip, t_emb):
+        x = self.up(x)
+        x = torch.cat([x, skip], dim=1)
+        return self.block(x, t_emb)
+
+class MiniUNet(nn.Module):
+    def __init__(self, time_dim=64, base=32):
+        super().__init__()
+        self.time_dim = time_dim
+
+        self.time_mlp = nn.Sequential(
+            nn.Linear(time_dim, time_dim * 4),
+            nn.SiLU(),
+            nn.Linear(time_dim * 4, time_dim),
+        )
+
+        self.in_conv = nn.Conv2d(1, base, 3, padding=1)
+
+        self.down1 = Down(base, base*2, time_dim)      # 28 -> 14
+        self.down2 = Down(base*2, base*4, time_dim)    # 14 -> 7
+
+        self.bot1 = ResidualBlock(base*4, base*4, time_dim)
+        self.bot2 = ResidualBlock(base*4, base*4, time_dim)
+
+        self.up2 = Up(base*4 + base*4, base*2, time_dim)  # 7 -> 14
+        self.up1 = Up(base*2 + base*2, base, time_dim)    # 14 -> 28
+
+        self.out_conv = nn.Conv2d(base, 1, 3, padding=1)
+
+    def forward(self, x, t):
+        t_emb = sinusoidal_time_embedding(t, dim=self.time_dim)
+        t_emb = self.time_mlp(t_emb)
+
+        x = self.in_conv(x)
+        x, skip1 = self.down1(x, t_emb)
+        x, skip2 = self.down2(x, t_emb)
+
+        x = self.bot1(x, t_emb)
+        x = self.bot2(x, t_emb)
+
+        x = self.up2(x, skip2, t_emb)
+        x = self.up1(x, skip1, t_emb)
+
+        return self.out_conv(x)
+
+# Instanciar modelo
+model = MiniUNet(time_dim=64, base=32).to(device)
+
+# Testar forward pass
+x0_test, _ = next(iter(train_loader))
+x0_test = x0_test.to(device)
+t_test = torch.randint(0, T, (x0_test.size(0),), device=device)
+eps_pred = model(x0_test, t_test)
+print(f"x0 shape: {x0_test.shape}, eps_pred shape: {eps_pred.shape}")
+
+# Contar parâmetros
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Total de parâmetros do modelo: {total_params:,}")
+
+# ============================
+# 6) Loop de treinamento
+# ============================
+lr = 2e-4
+optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
+def train_one_epoch(model, loader):
+    model.train()
+    losses = []
+    
+    for batch_idx, (x0, _) in enumerate(loader):
+        x0 = x0.to(device)
+        
+        # Amostrar t uniformemente
+        t = torch.randint(0, T, (x0.size(0),), device=device, dtype=torch.long)
+        
+        # Adicionar ruído (processo direto)
+        xt, eps = q_sample(x0, t)
+        
+        # Prever ruído
+        eps_pred = model(xt, t)
+        
+        # Calcular loss
+        loss = F.mse_loss(eps_pred, eps)
+        
+        # Backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        losses.append(loss.item())
+        
+        # Log a cada 50 batches
+        if batch_idx % 50 == 0:
+            print(f"  Batch {batch_idx}/{len(loader)} - Loss: {loss.item():.4f}")
+    
+    return float(np.mean(losses))
+
+# Treinar por algumas épocas
+epochs = 3
+history = []
+
+print("\n" + "="*50)
+print("INICIANDO TREINAMENTO")
+print("="*50)
+
+for ep in range(1, epochs + 1):
+    print(f"\nEpoch {ep}/{epochs}")
+    mean_loss = train_one_epoch(model, train_loader)
+    history.append(mean_loss)
+    print(f"Epoch {ep} concluída - Loss média: {mean_loss:.4f}")
+
+# Plotar histórico de loss
+plt.figure()
+plt.plot(history, marker="o", linestyle="-")
+plt.title("Loss por época (MSE do ruído ε)")
+plt.xlabel("Época")
+plt.ylabel("Loss")
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# Salvar checkpoint
+os.makedirs("checkpoints", exist_ok=True)
+ckpt_path = "checkpoints/mini_ddpm_mnist.pth"
+torch.save({
+    "model_state_dict": model.state_dict(),
+    "optimizer_state_dict": optimizer.state_dict(),
+    "epoch": epochs,
+    "loss": history[-1],
+    "T": T,
+    "beta_start": beta_start,
+    "beta_end": beta_end,
+    "alpha_bar": alpha_bar.cpu()
+}, cpt_path)
+print(f"\n✓ Checkpoint salvo em: {ckpt_path}")
+
+# ============================
+# 7) Amostragem (gerar novas imagens)
+# ============================
+@torch.no_grad()
+def p_sample(model, x, t):
+    """Um passo de sampling reverso"""
+    model.eval()
+    
+    # Prever ruído
+    eps_pred = model(x, t)
+    
+    # Calcular x0 aproximado
+    a_bar = alpha_bar[t].view(-1, 1, 1, 1)
+    x0_hat = (x - torch.sqrt(1 - a_bar) * eps_pred) / torch.sqrt(a_bar)
+    
+    # Calcular média e variância para o próximo passo
+    a = alpha[t].view(-1, 1, 1, 1)
+    a_bar_prev = alpha_bar[t-1].view(-1, 1, 1, 1) if t > 0 else torch.ones_like(a_bar)
+    
+    # Coeficientes
+    mean_coef1 = torch.sqrt(a) * (1 - a_bar_prev) / (1 - a_bar)
+    mean_coef2 = torch.sqrt(a_bar_prev) * (1 - a) / (1 - a_bar)
+    mean = mean_coef1 * x + mean_coef2 * x0_hat
+    
+    if t > 0:
+        variance = (1 - a_bar_prev) / (1 - a_bar) * (1 - a)
+        std = torch.sqrt(variance)
+        noise = torch.randn_like(x)
+        return mean + std * noise
     else:
-        st.info("Click the 'Generate Samples' button to create images")
+        return mean
 
-with col2:
-    st.subheader("ℹ️ About")
+@torch.no_grad()
+def p_sample_loop(model, n_samples=16, return_frames=False):
+    """Loop completo de sampling reverso"""
+    model.eval()
     
-    st.markdown("""
-    ### Mini-DDPM Demo
+    # Começar com ruído puro
+    x = torch.randn(n_samples, 1, 28, 28, device=device)
     
-    This is a simplified demonstration of Diffusion Models.
+    frames = []
     
-    **Features:**
-    - Generate synthetic images
-    - Multiple pattern types
-    - Adjustable parameters
-    
-    **Real implementation would:**
-    1. Load trained model weights
-    2. Perform actual diffusion sampling
-    3. Support conditional generation
-    
-    **Tech Stack:**
-    - PyTorch for ML
-    - Streamlit for UI
-    - Matplotlib for viz
-    """)
-    
-    # Show system info
-    with st.expander("System Information"):
-        st.text(f"PyTorch available: {TORCH_AVAILABLE}")
-        if TORCH_AVAILABLE:
-            st.text(f"PyTorch version: {torch.__version__}")
-        st.text(f"NumPy version: {np.__version__}")
-
-# Add some examples
-st.sidebar.markdown("---")
-st.sidebar.subheader("📚 Examples")
-
-example_mode = st.sidebar.selectbox(
-    "Quick Examples",
-    ["Random", "Stripes", "Checkerboard", "Gradient"]
-)
-
-if st.sidebar.button("Load Example"):
-    with col1:
-        st.info(f"Loading {example_mode} example...")
+    # Reversão do processo (T-1 até 0)
+    for t_inv in range(T-1, -1, -1):
+        t = torch.full((n_samples,), t_inv, device=device, dtype=torch.long)
+        x = p_sample(model, x, t)
         
-        # Create example based on selection
-        if example_mode == "Stripes":
-            img = np.zeros((1, 28, 28))
-            for i in range(0, 28, 4):
-                img[:, :, i:i+2] = 1
-        elif example_mode == "Checkerboard":
-            x = np.arange(28)
-            img = (x[:, None] // 4 + x[None, :] // 4) % 2
-            img = img.reshape(1, 28, 28)
-        elif example_mode == "Gradient":
-            x = np.linspace(0, 1, 28)
-            img = x[:, None] * x[None, :]
-            img = img.reshape(1, 28, 28)
-        else:  # Random
-            img = np.random.rand(1, 28, 28)
-        
-        fig, ax = plt.subplots(figsize=(3, 3))
-        ax.imshow(img.squeeze(), cmap="gray")
-        ax.axis("off")
-        ax.set_title(f"{example_mode} Example")
-        st.pyplot(fig)
+        if return_frames and t_inv in [T-1, int(T*0.75), int(T*0.5), int(T*0.25), 0]:
+            frames.append(x.clone())
+    
+    x = torch.clamp(x, -1, 1)
+    
+    if return_frames:
+        return x, frames
+    return x
 
-# Footer
-st.markdown("---")
-st.caption("Mini-DDPM Demo | Educational Purpose | Built with Streamlit")
+# Gerar amostras
+print("\n" + "="*50)
+print("GERANDO AMOSTRAS")
+print("="*50)
+
+samples, frames = p_sample_loop(model, n_samples=16, return_frames=True)
+
+# Mostrar amostras finais
+show_images(samples, "Amostras geradas pelo modelo", n=16)
+
+# Mostrar evolução da geração
+print("\nEvolução da geração (frames em diferentes passos):")
+plt.figure(figsize=(15, 8))
+step_names = ["Ruído puro (t=199)", "t=150", "t=100", "t=50", "Final (t=0)"]
+
+for i, (frame, step_name) in enumerate(zip(frames, step_names)):
+    plt.subplot(2, 3, i+1)
+    
+    # Pegar as primeiras 6 imagens do frame
+    grid_img = torch.cat([(img.detach().cpu().squeeze(0) + 1) / 2 for img in frame[:6]], dim=2)
+    plt.imshow(grid_img, cmap="gray")
+    plt.title(step_name)
+    plt.axis("off")
+
+plt.suptitle("Evolução da geração (difusão reversa)")
+plt.tight_layout()
+plt.show()
+
+# ============================
+# 8) Testar interpolação entre dígitos
+# ============================
+@torch.no_grad()
+def interpolate(model, z1, z2, steps=5):
+    """Interpolação linear no espaço latente"""
+    model.eval()
+    alphas = torch.linspace(0, 1, steps, device=device)
+    
+    interpolated_samples = []
+    
+    for alpha in alphas:
+        z = alpha * z1 + (1 - alpha) * z2
+        x = z.clone()
+        
+        # Processo de sampling reverso
+        for t_inv in range(T-1, -1, -1):
+            t = torch.full((z1.size(0),), t_inv, device=device, dtype=torch.long)
+            x = p_sample(model, x, t)
+        
+        interpolated_samples.append(x)
+    
+    return interpolated_samples
+
+# Gerar duas sementes de ruído diferentes
+z1 = torch.randn(1, 1, 28, 28, device=device)
+z2 = torch.randn(1, 1, 28, 28, device=device)
+
+# Interpolar
+interpolated = interpolate(model, z1, z2, steps=7)
+
+# Visualizar interpolação
+print("\nInterpolação entre duas sementes de ruído:")
+fig, axes = plt.subplots(1, 7, figsize=(15, 3))
+
+for i, sample in enumerate(interpolated):
+    img = sample[0].detach().cpu().squeeze(0)
+    img = (img + 1) / 2
+    axes[i].imshow(img, cmap="gray")
+    axes[i].axis('off')
+    axes[i].set_title(f"α={i/6:.1f}")
+
+plt.suptitle("Interpolação no espaço latente")
+plt.tight_layout()
+plt.show()
+
+print("\n" + "="*50)
+print("EXECUÇÃO CONCLUÍDA!")
+print("="*50)
+print(f"Modelo treinado por {epochs} épocas")
+print(f"Loss final: {history[-1]:.4f}")
+print(f"Amostras salvas e visualizadas")
