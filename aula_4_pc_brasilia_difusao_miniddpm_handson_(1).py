@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import math
-import os
 import random
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,10 +14,9 @@ from io import BytesIO
 # ============================
 # 1) Configurações de Página
 # ============================
-st.set_page_config(page_title="DDPM T=500 Completo", layout="wide")
-st.title("🎨 Mini-DDPM: Modelo de Difusão Completo (T=500)")
+st.set_page_config(page_title="DDPM Pro Lab", layout="wide")
+st.title("🚀 Diffusion Pro Lab: T=500 + Diagnósticos")
 
-# Hiperparâmetros fixos
 T = 500 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -31,16 +29,17 @@ def seed_everything(seed: int = 42):
 seed_everything(42)
 
 # ============================
-# 2) Agendamento de Ruído (Schedules)
+# 2) Inicialização do Estado (Session State)
 # ============================
-beta = torch.linspace(1e-4, 0.02, T).to(device)
-alpha = 1.0 - beta
-alpha_bar = torch.cumprod(alpha, dim=0).to(device)
+if "model" not in st.session_state:
+    # Definiremos a classe antes, mas o estado precisa ser inicializado
+    pass 
 
-def q_sample(x0, t, noise=None):
-    if noise is None: noise = torch.randn_like(x0)
-    a_bar = alpha_bar[t].view(-1, 1, 1, 1)
-    return torch.sqrt(a_bar) * x0 + torch.sqrt(1.0 - a_bar) * noise, noise
+if "loss_history" not in st.session_state:
+    st.session_state.loss_history = []
+
+if "gallery" not in st.session_state:
+    st.session_state.gallery = []
 
 # ============================
 # 3) Arquitetura da Rede (U-Net)
@@ -75,141 +74,126 @@ class ResidualBlock(nn.Module):
         h = self.act(h)
         return h + self.res_conv(x)
 
-class Down(nn.Module):
-    def __init__(self, in_ch, out_ch, time_dim):
-        super().__init__()
-        self.block = ResidualBlock(in_ch, out_ch, time_dim)
-        self.pool = nn.AvgPool2d(2)
-    def forward(self, x, t_emb):
-        h = self.block(x, t_emb)
-        return self.pool(h), h
-
-class Up(nn.Module):
-    def __init__(self, in_ch, out_ch, time_dim):
-        super().__init__()
-        self.up = nn.Upsample(scale_factor=2, mode="nearest")
-        self.block = ResidualBlock(in_ch, out_ch, time_dim)
-    def forward(self, x, skip, t_emb):
-        x = self.up(x)
-        x = torch.cat([x, skip], dim=1)
-        return self.block(x, t_emb)
-
 class MiniUNet(nn.Module):
     def __init__(self, time_dim=64, base=32):
         super().__init__()
         self.time_dim = time_dim
-        self.time_mlp = nn.Sequential(
-            nn.Linear(time_dim, time_dim * 4), nn.SiLU(), nn.Linear(time_dim * 4, time_dim)
-        )
+        self.time_mlp = nn.Sequential(nn.Linear(time_dim, time_dim * 4), nn.SiLU(), nn.Linear(time_dim * 4, time_dim))
         self.in_conv = nn.Conv2d(1, base, 3, padding=1)
-        self.down1 = Down(base, base*2, time_dim)
-        self.down2 = Down(base*2, base*4, time_dim)
-        self.bot1 = ResidualBlock(base*4, base*4, time_dim)
-        self.bot2 = ResidualBlock(base*4, base*4, time_dim)
-        self.up2 = Up(base*4 + base*4, base*2, time_dim)
-        self.up1 = Up(base*2 + base*2, base, time_dim)
+        self.down1 = nn.Sequential(nn.Conv2d(base, base*2, 3, padding=1, stride=2), nn.SiLU())
+        self.bot1 = ResidualBlock(base*2, base*2, time_dim)
+        self.up1 = nn.Sequential(nn.Upsample(scale_factor=2), nn.Conv2d(base*2, base, 3, padding=1), nn.SiLU())
         self.out_conv = nn.Conv2d(base, 1, 3, padding=1)
 
     def forward(self, x, t):
-        t_emb = sinusoidal_time_embedding(t, dim=self.time_dim)
-        t_emb = self.time_mlp(t_emb)
+        t_emb = self.time_mlp(sinusoidal_time_embedding(t, self.time_dim))
         x = self.in_conv(x)
-        x, skip1 = self.down1(x, t_emb)
-        x, skip2 = self.down2(x, t_emb)
+        x = self.down1(x)
         x = self.bot1(x, t_emb)
-        x = self.bot2(x, t_emb)
-        x = self.up2(x, skip2, t_emb)
-        x = self.up1(x, skip1, t_emb)
+        x = self.up1(x)
         return self.out_conv(x)
 
-# ============================
-# 4) Gerenciamento de Dados e Estado
-# ============================
 if "model" not in st.session_state:
     st.session_state.model = MiniUNet().to(device)
 
-@st.cache_resource
-def get_loader(dataset_name, size):
+# ============================
+# 4) Agendamento de Ruído
+# ============================
+beta = torch.linspace(1e-4, 0.02, T).to(device)
+alpha = 1.0 - beta
+alpha_bar = torch.cumprod(alpha, dim=0).to(device)
+
+def q_sample(x0, t):
+    noise = torch.randn_like(x0)
+    a_bar = alpha_bar[t].view(-1, 1, 1, 1)
+    return torch.sqrt(a_bar) * x0 + torch.sqrt(1.0 - a_bar) * noise, noise
+
+# ============================
+# 5) Painel Lateral & Treino (Gráfico de Loss)
+# ============================
+st.sidebar.header("🛠️ Treinamento")
+dataset_name = st.sidebar.selectbox("Dataset", ["MNIST", "FashionMNIST"])
+epochs = st.sidebar.slider("Épocas", 1, 30, 5)
+
+if st.sidebar.button("🚀 Iniciar Treino"):
     transform = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x*2-1)])
-    if dataset_name == "MNIST":
-        ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
-    else:
-        ds = datasets.FashionMNIST(root="./data", train=True, download=True, transform=transform)
-    return DataLoader(Subset(ds, np.random.choice(len(ds), size, False)), batch_size=128, shuffle=True)
-
-# ============================
-# 5) Interface Lateral (Sidebar)
-# ============================
-st.sidebar.header("🔧 Painel de Controle")
-dataset_choice = st.sidebar.selectbox("Escolha o Dataset", ["MNIST", "FashionMNIST"])
-epochs = st.sidebar.slider("Número de Épocas", 1, 20, 5)
-train_size = st.sidebar.number_input("Tamanho do Subset", 1000, 10000, 3000)
-
-if st.sidebar.button("🚀 Iniciar Treinamento"):
-    loader = get_loader(dataset_choice, train_size)
-    optimizer = torch.optim.AdamW(st.session_state.model.parameters(), lr=2e-4)
+    ds_class = datasets.MNIST if dataset_name == "MNIST" else datasets.FashionMNIST
+    ds = ds_class(root="./data", train=True, download=True, transform=transform)
+    loader = DataLoader(Subset(ds, np.random.choice(len(ds), 4000, False)), batch_size=128, shuffle=True)
+    
+    optimizer = torch.optim.AdamW(st.session_state.model.parameters(), lr=1e-3)
     st.session_state.model.train()
     
-    prog_bar = st.progress(0)
-    status_text = st.empty()
-    
     for ep in range(epochs):
-        losses = []
+        epoch_losses = []
         for x0, _ in loader:
             x0 = x0.to(device)
             t = torch.randint(0, T, (x0.size(0),), device=device)
             xt, eps = q_sample(x0, t)
             eps_pred = st.session_state.model(xt, t)
             loss = F.mse_loss(eps_pred, eps)
-            
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            losses.append(loss.item())
-        
-        status_text.write(f"Época {ep+1}/{epochs} - Loss Médio: {np.mean(losses):.4f}")
-        prog_bar.progress((ep + 1) / epochs)
-    st.sidebar.success("Treino Finalizado com Sucesso!")
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
+            epoch_losses.append(loss.item())
+        st.session_state.loss_history.append(np.mean(epoch_losses))
+    st.sidebar.success("Treino concluído!")
 
-# Download de pesos
-ckpt = BytesIO()
-torch.save(st.session_state.model.state_dict(), ckpt)
-st.sidebar.download_button("💾 Baixar Modelo (.pth)", ckpt.getvalue(), "modelo_t500.pth")
+if st.session_state.loss_history:
+    st.sidebar.subheader("📈 Curva de Aprendizado")
+    st.sidebar.line_chart(st.session_state.loss_history)
 
 # ============================
-# 6) Amostragem e Visualização
+# 6) Amostragem com Previsão x0
 # ============================
-st.header("🖼️ Geração Reversa (T=500)")
-st.write("Veja o modelo removendo o ruído passo a passo:")
+st.header("🖼️ Geração e Evolução (Previsão Interna $x_0$)")
+st.markdown("A linha superior é a imagem ruidosa atual ($x_t$). A linha inferior é o que a rede **acha** que é a imagem limpa ($x_0$ predicted) naquele momento.")
 
-if st.button("✨ Gerar Nova Imagem"):
+if st.button("✨ Gerar Sequência de Difusão"):
     st.session_state.model.eval()
     x = torch.randn(1, 1, 28, 28, device=device)
     
-    # Snapshots para visualização (5 estágios)
-    snapshots = []
-    snapshot_steps = [499, 375, 250, 125, 0]
+    snapshots_xt = []
+    snapshots_x0 = []
+    steps_to_show = [499, 300, 150, 50, 0]
     
-    with st.spinner("Realizando amostragem..."):
-        for t_inv in range(T-1, -1, -1):
-            t_step = torch.full((1,), t_inv, device=device, dtype=torch.long)
-            with torch.no_grad():
-                eps_pred = st.session_state.model(x, t_step)
-                a_bar = alpha_bar[t_step].view(-1, 1, 1, 1)
-                x0_hat = (x - torch.sqrt(1 - a_bar) * eps_pred) / torch.sqrt(a_bar)
-                a = alpha[t_step].view(-1, 1, 1, 1)
-                z = torch.randn_like(x) if t_inv > 0 else 0
-                x = torch.sqrt(a) * x0_hat + torch.sqrt(1 - a) * z
-                x = torch.clamp(x, -1, 1) # Impede imagens brancas
+    for t_inv in range(T-1, -1, -1):
+        t_step = torch.full((1,), t_inv, device=device, dtype=torch.long)
+        with torch.no_grad():
+            eps_pred = st.session_state.model(x, t_step)
+            a_bar = alpha_bar[t_step].view(-1, 1, 1, 1)
             
-            if t_inv in snapshot_steps:
-                snapshots.append((x.clone(), t_inv))
+            # Cálculo da Previsão x0 (A "mágica" interna)
+            predicted_x0 = (x - torch.sqrt(1 - a_bar) * eps_pred) / torch.sqrt(a_bar)
+            predicted_x0 = torch.clamp(predicted_x0, -1, 1)
+            
+            # Passo de amostragem padrão
+            a = alpha[t_step].view(-1, 1, 1, 1)
+            z = torch.randn_like(x) if t_inv > 0 else 0
+            x = torch.sqrt(a) * predicted_x0 + torch.sqrt(1 - a) * z
+            x = torch.clamp(x, -1, 1)
 
-    # Exibição em colunas
-    cols = st.columns(len(snapshots))
-    for i, (img_tensor, step_val) in enumerate(snapshots):
+            if t_inv in steps_to_show:
+                snapshots_xt.append((x.clone(), t_inv))
+                snapshots_x0.append(predicted_x0.clone())
+
+    # Exibição das Colunas (Processo t -> 0)
+    cols = st.columns(len(snapshots_xt))
+    for i in range(len(snapshots_xt)):
         with cols[i]:
-            st.caption(f"Passo t={step_val}")
-            # Desnormaliza: [-1, 1] -> [0, 1]
-            img_final = (img_tensor.squeeze().cpu().numpy() + 1) / 2
-            st.image(img_final, use_container_width=True)
+            st.caption(f"t={snapshots_xt[i][1]}")
+            st.image((snapshots_xt[i][0].squeeze().cpu().numpy()+1)/2, caption="Estado xt", use_container_width=True)
+            st.image((snapshots_x0[i].squeeze().cpu().numpy()+1)/2, caption="Previsão x0", use_container_width=True)
+    
+    # Salvar na Galeria
+    final_img = (x.squeeze().cpu().numpy()+1)/2
+    st.session_state.gallery.append(final_img)
+
+# ============================
+# 7) Galeria de Imagens
+# ============================
+if st.session_state.gallery:
+    st.divider()
+    st.header("🗂️ Galeria de Gerações Anteriores")
+    gal_cols = st.columns(6)
+    for idx, img in enumerate(reversed(st.session_state.gallery)):
+        if idx < 18: # Limite para não poluir
+            gal_cols[idx % 6].image(img, use_container_width=True)
