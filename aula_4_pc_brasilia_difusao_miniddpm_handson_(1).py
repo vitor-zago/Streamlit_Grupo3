@@ -12,10 +12,11 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
 # ============================
-# 1) Configurações Iniciais
+# 1) Configurações de Página
 # ============================
-st.set_page_config(page_title="Mini-DDPM MNIST", layout="wide")
-st.title("🚀 Mini-DDPM: Modelo de Difusão (MNIST)")
+st.set_page_config(page_title="Mini-DDPM Brasília", layout="wide")
+st.title("🧠 Hands-On: Modelos de Difusão (Mini-DDPM)")
+st.markdown("Objetivo: Gerar imagens de dígitos/roupas a partir de puro ruído.")
 
 def seed_everything(seed: int = 42):
     random.seed(seed)
@@ -25,10 +26,10 @@ def seed_everything(seed: int = 42):
 
 seed_everything(42)
 device = "cuda" if torch.cuda.is_available() else "cpu"
-st.sidebar.write(f"Executando em: **{device.upper()}**")
+st.sidebar.info(f"Dispositivo detectado: {device.upper()}")
 
 # ============================
-# 2) Definição da Arquitetura
+# 2) Arquitetura da Rede (U-Net)
 # ============================
 def sinusoidal_time_embedding(t, dim=64):
     device = t.device
@@ -112,7 +113,7 @@ class MiniUNet(nn.Module):
         return self.out_conv(x)
 
 # ============================
-# 3) Difusão e Dados
+# 3) Lógica de Difusão
 # ============================
 T = 200
 beta = torch.linspace(1e-4, 0.02, T).to(device)
@@ -125,79 +126,102 @@ def q_sample(x0, t, noise=None):
     a_bar = alpha_bar[t].view(-1, 1, 1, 1)
     return torch.sqrt(a_bar) * x0 + torch.sqrt(1.0 - a_bar) * noise, noise
 
-@st.cache_resource
-def get_dataloader():
+# ============================
+# 4) Interface Streamlit
+# ============================
+if "model" not in st.session_state:
+    st.session_state.model = MiniUNet().to(device)
+
+st.sidebar.header("Configuração")
+dataset_type = st.sidebar.selectbox("Escolha o Dataset", ["MNIST (Números)", "FashionMNIST (Roupas)"])
+n_epochs = st.sidebar.slider("Épocas de Treino", 1, 10, 2)
+subset_size = st.sidebar.number_input("Tamanho do Subset (Imagens)", 1000, 10000, 3000)
+
+if st.sidebar.button("🚀 Iniciar Treinamento"):
+    # Carregamento de dados
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Lambda(lambda x: x * 2 - 1)
+        transforms.Lambda(lambda x: x * 2 - 1) # Normaliza para [-1, 1]
     ])
-    train_ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
-    indices = np.random.choice(len(train_ds), size=5000, replace=False) # Reduzido para Streamlit
-    subset = Subset(train_ds, indices)
-    return DataLoader(subset, batch_size=128, shuffle=True)
-
-# ============================
-# 4) Sidebar e Controle
-# ============================
-st.sidebar.header("Parâmetros")
-epochs = st.sidebar.slider("Épocas", 1, 10, 2)
-train_btn = st.sidebar.button("Treinar Modelo")
-
-if "model_state" not in st.session_state:
-    st.session_state.model_state = MiniUNet().to(device)
-
-# ============================
-# 5) Loop de Treino (Streamlit)
-# ============================
-if train_btn:
-    loader = get_dataloader()
-    optimizer = torch.optim.AdamW(st.session_state.model_state.parameters(), lr=2e-4)
-    progress_bar = st.progress(0)
     
-    for ep in range(epochs):
-        losses = []
-        for x0, _ in loader:
+    with st.spinner(f"Baixando e preparando {dataset_type}..."):
+        if dataset_type == "MNIST (Números)":
+            full_ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
+        else:
+            full_ds = datasets.FashionMNIST(root="./data", train=True, download=True, transform=transform)
+            
+        indices = np.random.choice(len(full_ds), size=subset_size, replace=False)
+        train_loader = DataLoader(Subset(full_ds, indices), batch_size=128, shuffle=True)
+
+    # Loop de Treino
+    optimizer = torch.optim.AdamW(st.session_state.model.parameters(), lr=2e-4)
+    loss_area = st.empty()
+    prog_bar = st.progress(0)
+    
+    st.session_state.model.train()
+    for ep in range(n_epochs):
+        epoch_losses = []
+        for x0, _ in train_loader:
             x0 = x0.to(device)
             t = torch.randint(0, T, (x0.size(0),), device=device)
             xt, eps = q_sample(x0, t)
-            eps_pred = st.session_state.model_state(xt, t)
+            eps_pred = st.session_state.model(xt, t)
             loss = F.mse_loss(eps_pred, eps)
             
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            losses.append(loss.item())
+            epoch_losses.append(loss.item())
         
-        avg_loss = np.mean(losses)
-        st.write(f"Época {ep+1} - Loss: {avg_loss:.4f}")
-        progress_bar.progress((ep + 1) / epochs)
-    st.success("Treino Finalizado!")
+        avg_l = np.mean(epoch_losses)
+        loss_area.write(f"📊 Época {ep+1}/{n_epochs} | Loss: {avg_l:.4f}")
+        prog_bar.progress((ep + 1) / n_epochs)
+    
+    st.success("✅ Treinamento concluído!")
 
 # ============================
-# 6) Amostragem e Visualização
+# 5) Amostragem (Geração)
 # ============================
-@torch.no_grad()
-def p_sample_loop(model, n=16):
-    model.eval()
-    x = torch.randn(n, 1, 28, 28, device=device)
+st.divider()
+st.header("🖼️ Geração via Difusão Reversa")
+st.write("Aqui o modelo tenta 'limpar' um ruído aleatório para formar uma imagem.")
+
+if st.button("✨ Gerar Novas Imagens"):
+    st.session_state.model.eval()
+    n_imgs = 16
+    # Começa com puro ruído gaussiano
+    x = torch.randn(n_imgs, 1, 28, 28, device=device)
+    
+    # Barra de progresso para a geração (sampling)
+    sample_bar = st.progress(0)
+    
     for t_inv in range(T-1, -1, -1):
-        t = torch.full((n,), t_inv, device=device, dtype=torch.long)
-        eps_pred = model(x, t)
-        a_bar = alpha_bar[t].view(-1, 1, 1, 1)
-        x0_hat = (x - torch.sqrt(1 - a_bar) * eps_pred) / torch.sqrt(a_bar)
-        a = alpha[t].view(-1, 1, 1, 1)
-        z = torch.randn_like(x) if t_inv > 0 else 0
-        x = torch.sqrt(a) * x0_hat + torch.sqrt(1 - a) * z
-    return x
-
-st.header("Gerar Imagens")
-if st.button("Gerar Amostras"):
-    with st.spinner("Gerando..."):
-        samples = p_sample_loop(st.session_state.model_state)
-        samples = (samples + 1) / 2
+        t_step = torch.full((n_imgs,), t_inv, device=device, dtype=torch.long)
         
-        fig, axes = plt.subplots(2, 8, figsize=(12, 3))
-        for i, ax in enumerate(axes.flatten()):
-            ax.imshow(samples[i].squeeze().cpu().numpy(), cmap="gray")
-            ax.axis("off")
-        st.pyplot(fig)
+        with torch.no_grad():
+            eps_pred = st.session_state.model(x, t_step)
+            a_bar = alpha_bar[t_step].view(-1, 1, 1, 1)
+            x0_hat = (x - torch.sqrt(1 - a_bar) * eps_pred) / torch.sqrt(a_bar)
+            a = alpha[t_step].view(-1, 1, 1, 1)
+            
+            z = torch.randn_like(x) if t_inv > 0 else 0
+            x = torch.sqrt(a) * x0_hat + torch.sqrt(1 - a) * z
+            
+            # CORREÇÃO CRÍTICA: Clamp para evitar valores que estouram o branco
+            x = torch.clamp(x, -1, 1)
+        
+        if t_inv % 20 == 0:
+            sample_bar.progress((T - t_inv) / T)
+
+    sample_bar.progress(100)
+    
+    # Exibição final
+    # Desnormaliza: [-1, 1] -> [0, 1]
+    imgs_to_show = (x + 1) / 2
+    imgs_to_show = imgs_to_show.cpu().numpy()
+    
+    fig, axes = plt.subplots(2, 8, figsize=(12, 4))
+    for i, ax in enumerate(axes.flatten()):
+        ax.imshow(imgs_to_show[i].squeeze(), cmap="gray")
+        ax.axis("off")
+    st.pyplot(fig)
