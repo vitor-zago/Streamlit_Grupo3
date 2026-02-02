@@ -10,10 +10,10 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
 # ============================
-# 1) Configurações de Página e Hiperparâmetros
+# 1) Configurações de Página
 # ============================
-st.set_page_config(page_title="DDPM Pro Lab Final", layout="wide")
-st.title("🎨 Mini-DDPM: Geração de Dígitos (T=500)")
+st.set_page_config(page_title="DDPM Fix: Anti-Error", layout="wide")
+st.title("🎨 Mini-DDPM: Geração Estável (T=500)")
 
 T = 500 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -39,7 +39,7 @@ def q_sample(x0, t):
     return torch.sqrt(a_bar) * x0 + torch.sqrt(1.0 - a_bar) * noise, noise
 
 # ============================
-# 3) Arquitetura U-Net Estabilizada (Fixa 28x28)
+# 3) Arquitetura U-Net Estabilizada
 # ============================
 class SinusoidalEmbedding(nn.Module):
     def __init__(self, dim):
@@ -82,10 +82,9 @@ class SimpleUNet(nn.Module):
         x_down = self.down(x_in)
         x_mid = self.mid(x_down, t_e)
         x_up = self.up(x_mid)
-        # Global Skip Connection: soma a entrada com a saída processada
         return self.outc(x_up + x_in)
 
-# Inicialização do Estado
+# Session State
 if "model" not in st.session_state:
     st.session_state.model = SimpleUNet().to(device)
 if "loss_history" not in st.session_state:
@@ -94,56 +93,52 @@ if "gallery" not in st.session_state:
     st.session_state.gallery = []
 
 # ============================
-# 4) Sidebar: Treino e Controle
+# 4) Auxiliar de Visualização (SOLUÇÃO DO ERRO)
 # ============================
-st.sidebar.header("⚙️ Configurações")
-dataset_name = st.sidebar.selectbox("Dataset", ["MNIST", "FashionMNIST"])
-epochs = st.sidebar.slider("Épocas", 5, 50, 20)
-lr = st.sidebar.number_input("Learning Rate", value=1e-3, format="%.4f")
+def convert_to_display(tensor):
+    """Garante que os dados estejam em [0.0, 1.0] para o st.image"""
+    img = tensor.squeeze().cpu().numpy()
+    img = (img + 1.0) / 2.0  # Desnormaliza de [-1, 1] para [0, 1]
+    return np.clip(img, 0.0, 1.0) # Força o limite para evitar RuntimeError
 
-if st.sidebar.button("🚀 Iniciar Treinamento"):
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x*2-1)])
+# ============================
+# 5) Treinamento
+# ============================
+st.sidebar.header("⚙️ Treino")
+dataset_name = st.sidebar.selectbox("Dataset", ["MNIST", "FashionMNIST"])
+epochs = st.sidebar.slider("Épocas", 1, 50, 10)
+
+if st.sidebar.button("🚀 Iniciar Treino"):
+    tr = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x*2-1)])
     ds_class = datasets.MNIST if dataset_name == "MNIST" else datasets.FashionMNIST
-    ds = ds_class(root="./data", train=True, download=True, transform=transform)
-    
-    # Aumentado para 5000 imagens para garantir convergência
-    loader = DataLoader(Subset(ds, np.random.choice(len(ds), 5000, False)), batch_size=128, shuffle=True)
-    optimizer = torch.optim.AdamW(st.session_state.model.parameters(), lr=lr)
+    ds = ds_class(root="./data", train=True, download=True, transform=tr)
+    loader = DataLoader(Subset(ds, np.random.choice(len(ds), 4000, False)), batch_size=128, shuffle=True)
+    opt = torch.optim.AdamW(st.session_state.model.parameters(), lr=1e-3)
     
     st.session_state.model.train()
     bar = st.progress(0)
     for ep in range(epochs):
-        losses = []
+        epoch_losses = []
         for x0, _ in loader:
             x0 = x0.to(device)
             t = torch.randint(0, T, (x0.size(0),), device=device)
             xt, eps = q_sample(x0, t)
             eps_pred = st.session_state.model(xt, t)
             loss = F.mse_loss(eps_pred, eps)
-            
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            losses.append(loss.item())
-        
-        st.session_state.loss_history.append(np.mean(losses))
+            opt.zero_grad(); loss.backward(); opt.step()
+            epoch_losses.append(loss.item())
+        st.session_state.loss_history.append(np.mean(epoch_losses))
         bar.progress((ep + 1) / epochs)
-    st.sidebar.success("Treino Finalizado!")
 
 if st.session_state.loss_history:
-    st.sidebar.subheader("📈 Curva de Loss")
     st.sidebar.line_chart(st.session_state.loss_history)
 
 # ============================
-# 5) Amostragem e Visualização
+# 6) Geração (Com Clamp Ativo)
 # ============================
-st.header("🖼️ Geração Reversa e Diagnóstico")
-st.write("Abaixo: linha superior é o estado atual ($x_t$), linha inferior é a previsão limpa ($\hat{x}_0$).")
-
-if st.button("✨ Gerar Sequência"):
+if st.button("✨ Gerar Nova Imagem"):
     st.session_state.model.eval()
     x = torch.randn(1, 1, 28, 28, device=device)
-    
     steps_to_show = [499, 300, 150, 50, 0]
     cols = st.columns(len(steps_to_show))
     col_idx = 0
@@ -151,36 +146,33 @@ if st.button("✨ Gerar Sequência"):
     for t_inv in range(T-1, -1, -1):
         t_step = torch.full((1,), t_inv, device=device, dtype=torch.long)
         with torch.no_grad():
-            eps_pred = st.session_state.model(x, t_step)
+            eps_p = st.session_state.model(x, t_step)
             a_bar = alpha_bar[t_step].view(-1, 1, 1, 1)
             
-            # Previsão x0: A tentativa da rede de ver a imagem sem ruído
-            pred_x0 = (x - torch.sqrt(1 - a_bar) * eps_pred) / torch.sqrt(a_bar)
-            pred_x0 = torch.clamp(pred_x0, -1, 1)
+            # Previsão x0
+            p_x0 = (x - torch.sqrt(1 - a_bar) * eps_p) / torch.sqrt(a_bar)
+            p_x0 = torch.clamp(p_x0, -1, 1)
             
-            # Algoritmo de amostragem DDPM
+            # Passo Reverso
             if t_inv > 0:
-                beta_t = beta[t_inv]
                 noise = torch.randn_like(x)
-                x = (1 / torch.sqrt(alpha[t_inv])) * (x - ((1 - alpha[t_inv]) / torch.sqrt(1 - a_bar)) * eps_pred) + torch.sqrt(beta_t) * noise
+                x = (1 / torch.sqrt(alpha[t_inv])) * (x - ((1 - alpha[t_inv]) / torch.sqrt(1 - a_bar)) * eps_p) + torch.sqrt(beta[t_inv]) * noise
             else:
-                x = pred_x0
+                x = p_x0
+            x = torch.clamp(x, -1, 1)
 
         if t_inv in steps_to_show:
             with cols[col_idx]:
-                st.caption(f"Passo t={t_inv}")
-                st.image((x.squeeze().cpu().numpy()+1)/2, caption="xt", use_container_width=True)
-                st.image((pred_x0.squeeze().cpu().numpy()+1)/2, caption="Pred x0", use_container_width=True)
+                st.caption(f"t={t_inv}")
+                st.image(convert_to_display(x), caption="xt", use_container_width=True)
+                st.image(convert_to_display(p_x0), caption="Pred x0", use_container_width=True)
             col_idx += 1
     
-    st.session_state.gallery.append((x.squeeze().cpu().numpy()+1)/2)
+    st.session_state.gallery.append(convert_to_display(x))
 
-# ============================
-# 6) Galeria
-# ============================
+# Galeria
 if st.session_state.gallery:
     st.divider()
-    st.subheader("🗂️ Galeria de Gerações")
     g_cols = st.columns(6)
     for i, img in enumerate(reversed(st.session_state.gallery)):
         if i < 12: g_cols[i % 6].image(img, use_container_width=True)
