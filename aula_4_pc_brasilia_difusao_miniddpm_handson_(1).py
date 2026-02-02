@@ -13,15 +13,14 @@ from torchvision import datasets, transforms
 from io import BytesIO
 
 # ============================
-# 1) Configurações de Página e Estilo
+# 1) Configurações de Página
 # ============================
-st.set_page_config(page_title="Diffusion Mini-DDPM", layout="wide")
-st.title("🎨 Mini-DDPM: Generative Diffusion Model")
-st.markdown("""
-Esta aplicação demonstra o processo de **Difusão**. 
-1. **Treine** o modelo ou **carregue** um checkpoint.
-2. Observe o modelo transformar **ruído puro** em **informação estruturada**.
-""")
+st.set_page_config(page_title="DDPM T=500 Completo", layout="wide")
+st.title("🎨 Mini-DDPM: Modelo de Difusão Completo (T=500)")
+
+# Hiperparâmetros fixos
+T = 500 
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def seed_everything(seed: int = 42):
     random.seed(seed)
@@ -30,13 +29,23 @@ def seed_everything(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 seed_everything(42)
-device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ============================
-# 2) Arquitetura U-Net e Utilidades
+# 2) Agendamento de Ruído (Schedules)
+# ============================
+beta = torch.linspace(1e-4, 0.02, T).to(device)
+alpha = 1.0 - beta
+alpha_bar = torch.cumprod(alpha, dim=0).to(device)
+
+def q_sample(x0, t, noise=None):
+    if noise is None: noise = torch.randn_like(x0)
+    a_bar = alpha_bar[t].view(-1, 1, 1, 1)
+    return torch.sqrt(a_bar) * x0 + torch.sqrt(1.0 - a_bar) * noise, noise
+
+# ============================
+# 3) Arquitetura da Rede (U-Net)
 # ============================
 def sinusoidal_time_embedding(t, dim=64):
-    device = t.device
     half = dim // 2
     freqs = torch.exp(-math.log(10000) * torch.arange(0, half, device=device).float() / (half - 1))
     args = t.float().view(-1, 1) * freqs.view(1, -1)
@@ -90,9 +99,7 @@ class MiniUNet(nn.Module):
         super().__init__()
         self.time_dim = time_dim
         self.time_mlp = nn.Sequential(
-            nn.Linear(time_dim, time_dim * 4),
-            nn.SiLU(),
-            nn.Linear(time_dim * 4, time_dim),
+            nn.Linear(time_dim, time_dim * 4), nn.SiLU(), nn.Linear(time_dim * 4, time_dim)
         )
         self.in_conv = nn.Conv2d(1, base, 3, padding=1)
         self.down1 = Down(base, base*2, time_dim)
@@ -116,55 +123,37 @@ class MiniUNet(nn.Module):
         return self.out_conv(x)
 
 # ============================
-# 3) Parâmetros de Difusão
-# ============================
-T = 200
-beta = torch.linspace(1e-4, 0.02, T).to(device)
-alpha = 1.0 - beta
-alpha_bar = torch.cumprod(alpha, dim=0).to(device)
-
-def q_sample(x0, t, noise=None):
-    if noise is None: noise = torch.randn_like(x0)
-    a_bar = alpha_bar[t].view(-1, 1, 1, 1)
-    return torch.sqrt(a_bar) * x0 + torch.sqrt(1.0 - a_bar) * noise, noise
-
-# ============================
-# 4) Gestão de Estado e Dados
+# 4) Gerenciamento de Dados e Estado
 # ============================
 if "model" not in st.session_state:
     st.session_state.model = MiniUNet().to(device)
 
 @st.cache_resource
-def load_data(dataset_name, subset_size):
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Lambda(lambda x: x * 2 - 1)
-    ])
+def get_loader(dataset_name, size):
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x*2-1)])
     if dataset_name == "MNIST":
         ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
     else:
         ds = datasets.FashionMNIST(root="./data", train=True, download=True, transform=transform)
-    
-    indices = np.random.choice(len(ds), size=subset_size, replace=False)
-    return DataLoader(Subset(ds, indices), batch_size=128, shuffle=True)
+    return DataLoader(Subset(ds, np.random.choice(len(ds), size, False)), batch_size=128, shuffle=True)
 
 # ============================
-# 5) Sidebar: Treino e Checkpoint
+# 5) Interface Lateral (Sidebar)
 # ============================
-st.sidebar.header("⚙️ Configurações")
-dataset_choice = st.sidebar.selectbox("Dataset", ["MNIST", "FashionMNIST"])
-subset_n = st.sidebar.number_input("Qtd Imagens", 1000, 20000, 5000)
-epochs_n = st.sidebar.slider("Épocas", 1, 20, 2)
+st.sidebar.header("🔧 Painel de Controle")
+dataset_choice = st.sidebar.selectbox("Escolha o Dataset", ["MNIST", "FashionMNIST"])
+epochs = st.sidebar.slider("Número de Épocas", 1, 20, 5)
+train_size = st.sidebar.number_input("Tamanho do Subset", 1000, 10000, 3000)
 
-if st.sidebar.button("🔴 Iniciar Treinamento"):
-    loader = load_data(dataset_choice, subset_n)
+if st.sidebar.button("🚀 Iniciar Treinamento"):
+    loader = get_loader(dataset_choice, train_size)
     optimizer = torch.optim.AdamW(st.session_state.model.parameters(), lr=2e-4)
     st.session_state.model.train()
     
     prog_bar = st.progress(0)
-    status = st.empty()
+    status_text = st.empty()
     
-    for ep in range(epochs_n):
+    for ep in range(epochs):
         losses = []
         for x0, _ in loader:
             x0 = x0.to(device)
@@ -178,37 +167,30 @@ if st.sidebar.button("🔴 Iniciar Treinamento"):
             optimizer.step()
             losses.append(loss.item())
         
-        status.write(f"Época {ep+1}/{epochs_n} - Loss: {np.mean(losses):.4f}")
-        prog_bar.progress((ep + 1) / epochs_n)
-    st.sidebar.success("Modelo Treinado!")
+        status_text.write(f"Época {ep+1}/{epochs} - Loss Médio: {np.mean(losses):.4f}")
+        prog_bar.progress((ep + 1) / epochs)
+    st.sidebar.success("Treino Finalizado com Sucesso!")
 
-st.sidebar.divider()
-# Download/Upload de Checkpoint
-ckpt_buffer = BytesIO()
-torch.save(st.session_state.model.state_dict(), ckpt_buffer)
-st.sidebar.download_button("💾 Baixar Checkpoint (.pth)", data=ckpt_buffer.getvalue(), file_name="model_diffusion.pth")
-
-uploaded_file = st.sidebar.file_uploader("📂 Carregar Checkpoint", type="pth")
-if uploaded_file:
-    st.session_state.model.load_state_dict(torch.load(uploaded_file, map_location=device))
-    st.sidebar.success("Pesos Carregados!")
+# Download de pesos
+ckpt = BytesIO()
+torch.save(st.session_state.model.state_dict(), ckpt)
+st.sidebar.download_button("💾 Baixar Modelo (.pth)", ckpt.getvalue(), "modelo_t500.pth")
 
 # ============================
-# 6) Amostragem e Visualização de Frames
+# 6) Amostragem e Visualização
 # ============================
-st.header("🖼️ Geração e Evolução Temporal")
-st.write("Abaixo você verá o processo reverso: o modelo removendo o ruído em estágios.")
+st.header("🖼️ Geração Reversa (T=500)")
+st.write("Veja o modelo removendo o ruído passo a passo:")
 
-if st.button("✨ Gerar Sequência Reversa"):
+if st.button("✨ Gerar Nova Imagem"):
     st.session_state.model.eval()
-    n_imgs = 1  # Focaremos em uma para ver os detalhes
     x = torch.randn(1, 1, 28, 28, device=device)
     
-    # Snapshots para mostrar a evolução
+    # Snapshots para visualização (5 estágios)
     snapshots = []
-    times_to_save = [199, 150, 100, 50, 0]
+    snapshot_steps = [499, 375, 250, 125, 0]
     
-    with st.spinner("Realizando amostragem reversa..."):
+    with st.spinner("Realizando amostragem..."):
         for t_inv in range(T-1, -1, -1):
             t_step = torch.full((1,), t_inv, device=device, dtype=torch.long)
             with torch.no_grad():
@@ -218,19 +200,16 @@ if st.button("✨ Gerar Sequência Reversa"):
                 a = alpha[t_step].view(-1, 1, 1, 1)
                 z = torch.randn_like(x) if t_inv > 0 else 0
                 x = torch.sqrt(a) * x0_hat + torch.sqrt(1 - a) * z
-                x = torch.clamp(x, -1, 1) # Clipping para evitar imagens brancas
+                x = torch.clamp(x, -1, 1) # Impede imagens brancas
             
-            if t_inv in times_to_save:
+            if t_inv in snapshot_steps:
                 snapshots.append((x.clone(), t_inv))
 
-    # Mostrar Frames
+    # Exibição em colunas
     cols = st.columns(len(snapshots))
-    for i, (img_t, t_val) in enumerate(snapshots):
+    for i, (img_tensor, step_val) in enumerate(snapshots):
         with cols[i]:
-            st.caption(f"Passo t={t_val}")
-            # Desnormalizar: [-1, 1] -> [0, 1]
-            img_disp = (img_t.squeeze().cpu().numpy() + 1) / 2
-            st.image(img_disp, use_container_width=True)
-
-st.divider()
-st.info("💡 Dica: Se as imagens ainda parecerem ruidosas, aumente o número de Épocas ou a Quantidade de Imagens no menu lateral.")
+            st.caption(f"Passo t={step_val}")
+            # Desnormaliza: [-1, 1] -> [0, 1]
+            img_final = (img_tensor.squeeze().cpu().numpy() + 1) / 2
+            st.image(img_final, use_container_width=True)
